@@ -198,19 +198,6 @@
 	    (append (list nil) edge)
 	    edge
 	    (append (cdr edge) (list nil)))))
-	
-(defun am:extrude-edge (edge block block-ref
-			/ edge-points segments extruded-points edge-segment)
-  (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
-	segments (am:pairs (am:generate-segments edge-points))
-	extruded-points (am:flatten-list
-			  (mapcar '(lambda (edge-segment)
-				     (list
-				       (am:extrude-point (car edge-segment) block block-ref)
-				       (am:extrude-point (cadr edge-segment) block block-ref)))
-				(am:flatten-list segments))))
-  (am:connect-extruded extruded-points block block-ref)
-  extruded-points)
 
 (defun am:do-extrusion (extrusion block block-ref
 			/ point direction dist upper-point)
@@ -223,9 +210,8 @@
     (vlax-3d-point upper-point))
   (vla-Update block-ref)
   upper-point)
-  
 
-(defun am:extrude-edge-mk2 (edge direction block block-ref
+(defun am:extrude-edge (edge direction block block-ref
 			    / edge-points extrusions extruded-points extrusion)
   (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
 	extrusions (am:plan-extrusions edge-points direction)
@@ -237,7 +223,7 @@
 
 (defun am:trench (/ acad-object doc start end model-space
 		  block block-ref start main-line	
-		  bottom-edges right-slope-bottom left-slope-bottm
+		  bottom-edges right-slope-bottom left-slope-bottom
 		  right-slope-top left-slope-top)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
@@ -252,5 +238,14 @@
 	bottom-edges (am:add-width main-line start block-ref)
 	right-slope-bottom (car bottom-edges)
 	left-slope-bottom (cadr bottom-edges)
-	right-slope-top (am:extrude-edge-mk2 right-slope-bottom -1 block block-ref)
-	left-slope-top (am:extrude-edge-mk2 left-slope-bottom 1 block block-ref)))
+	right-slope-top (am:extrude-edge right-slope-bottom -1 block block-ref)
+	left-slope-top (am:extrude-edge left-slope-bottom 1 block block-ref)))
+
+;allow closed main lines
+;correct slope marking
+;insert hypotenuse for each point
+;remove the first point in (getdist) and ask for full width
+;delete block on object removal
+;ghost images
+;control points
+;the shading on slopes should stretch over the whole edge
