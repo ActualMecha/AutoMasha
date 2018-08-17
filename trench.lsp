@@ -1,9 +1,15 @@
 (vl-load-com)
 
+; constants and utils
+
 (setq am:int16 1070)
+(setq am:pi/2 (/ pi 2.0))
+(setq am:2pi (* pi 2.0))
 
 (defun am:default (value default)
   (if value value default))
+
+; persistence
 
 (defun am:get-dictionary (doc
 			  / dictionary-name dictionaries dictionary)
@@ -21,6 +27,26 @@
     record
     (vla-AddXRecord dictionary name)))
 
+(defun am:get-variable (doc name
+			/ dictionary record out-type out-value)
+  (setq dictionary (am:get-dictionary doc)
+	record (am:get-xrecord dictionary name))
+  (vla-GetXRecordData record 'out-type 'out-value)
+  (if (/= out-value nil)
+    (vlax-variant-value (vlax-safearray-get-element out-value 0))))
+
+(defun am:set-variable (doc name var-type var-value
+			/ dictionary record record-type record-value)
+  (setq dictionary (am:get-dictionary doc)
+	record (am:get-xrecord dictionary name)
+	record-type (vlax-make-safearray vlax-vbInteger '(0 . 0))
+	record-value (vlax-make-safearray vlax-vbVariant '(0 . 0)))
+  (vlax-safearray-put-element record-type 0 var-type)
+  (vlax-safearray-put-element record-value 0 var-value)
+  (vla-SetXRecordData record record-type record-value))
+
+; list manipulations
+
 (defun am:variant->list (variant-array)
   (vlax-safearray->list (vlax-variant-value variant-array)))
 
@@ -32,6 +58,10 @@
 	    rest (cddr flat-list))
       (append (list pair) (am:pairs rest)))))
 
+(defun am:flatten-list (list-of-lists) 
+  (if list-of-lists
+    (append (car list-of-lists) (am:flatten-list (cdr list-of-lists)))))
+
 (defun am:generate-segments (points
 			     / first second rest)
   (setq first (car points)
@@ -40,14 +70,10 @@
   (if second
     (append (list first second) (am:generate-segments rest))))
 
-(defun am:flatten-list (list-of-lists) 
-  (if list-of-lists
-    (append (car list-of-lists) (am:flatten-list (cdr list-of-lists)))))
-
-;;; Math
+; Math
 
 (defun am:scalar-op (operation arg1 arg2
-		     / left-fn right-fn func list-art)
+		     / left-fn right-fn func list-arg)
   (setq left-fn '(lambda (x) (apply operation (list x arg2)))
 	right-fn '(lambda (x) (apply operation (list arg1 x))))
   (cond ((listp arg1)
@@ -78,7 +104,11 @@
 (defun am:normalize (vector
 		     / len)
   (setq len (am:length vector))
-  (mapcar '(lambda (x) (/ x len)) vector))
+  (if (/= 0 len)
+    (mapcar '(lambda (x) (/ x len)) vector)))
+
+(defun am:flatten-point (3dpt)
+  (list (car 3dpt) (cadr 3dpt)))
 
 (defun am:rotate90 (vector)
   (list (- (cadr vector))
@@ -95,23 +125,24 @@
 	((or (= side1 0) (= side2 0)) (not strict))
 	(t ())))	 
 
-(defun am:get-variable (doc name
-			/ dictionary record out-type out-value)
-  (setq dictionary (am:get-dictionary doc)
-	record (am:get-xrecord dictionary name))
-  (vla-GetXRecordData record 'out-type 'out-value)
-  (if (/= out-value nil)
-    (vlax-variant-value (vlax-safearray-get-element out-value 0))))
+(defun am:angle-between (v1 v2
+			 / ang)
+  (setq ang (- (atan (cadr v2) (car v2))
+	       (atan (cadr v1) (car v1))))
+  (if (< ang 0.0)
+      (+ (* 2 pi) ang)
+      ang))
 
-(defun am:set-variable (doc name var-type var-value
-			/ dictionary record record-type record-value)
-  (setq dictionary (am:get-dictionary doc)
-	record (am:get-xrecord dictionary name)
-	record-type (vlax-make-safearray vlax-vbInteger '(0 . 0))
-	record-value (vlax-make-safearray vlax-vbVariant '(0 . 0)))
-  (vlax-safearray-put-element record-type 0 var-type)
-  (vlax-safearray-put-element record-value 0 var-value)
-  (vla-SetXRecordData record record-type record-value))
+(defun am:rotate-vector (v radians
+			 / x y sina cosa)
+  (setq x (car v)
+	y (cadr v)
+	sina (sin radians)
+	cosa (cos radians))
+  (list (- (* cosa x) (* sina y))
+	(+ (* sina x) (* cosa y))))
+
+; Drawing
 
 (defun am:create-block (doc
 			/ id-name id block-name block)
@@ -124,23 +155,20 @@
   (am:set-variable doc id-name am:int16 (1+ id))
   block)
 
-(defun am:flatten (3dpt)
-  (list (car 3dpt) (cadr 3dpt)))
-
 (defun am:append-tail (polyline last-position len block-ref
 		       / next-position point)
-  (setq next-position (am:flatten (getpoint last-position "Next segment"))
+  (setq next-position (am:flatten-point (getpoint last-position "Next segment"))
 	point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
   (vlax-safearray-fill point next-position)
   (vla-AddVertex polyline len point)
   (vla-Update block-ref)
-  (if (< len 1)
+  (if (< len 3)
     (am:append-tail polyline next-position (1+ len) block-ref)))
 
 (defun am:construct-main-line (doc block block-ref
 			       / start first points polyline)
-  (setq start (am:flatten (getpoint "Trench start"))
-	first (am:flatten (getpoint start "First segment"))
+  (setq start (am:flatten-point (getpoint "Trench start"))
+	first (am:flatten-point (getpoint start "First segment"))
 	points (vlax-make-safearray vlax-vbDouble '(0 . 3)))
   (vlax-safearray-fill points (append start first))
   (setq polyline (vla-AddLightweightPolyline block points))
@@ -169,35 +197,32 @@
 (defun am:connect-extruded (points block block-ref
 			    / array flat-list)
   (setq array (vlax-make-safearray vlax-vbDouble (cons 0 (1- (* 2 (length points)))))
-	flat-list (am:flatten-list (mapcar 'am:flatten points)))
+	flat-list (am:flatten-list (mapcar 'am:flatten-point points)))
   (vlax-safearray-fill array flat-list)
   (vla-AddLightweightPolyline block array)
   (vla-Update block-ref))
 
 (defun am:plan-extrusion (prev-point point next-point direction
-			  / next-segment-v prev-segment-v curve-direction)
+			  / next-segment-v prev-segment-v extruded-vector
+			  full-angle half-angle)
   (setq next-segment-v (am:vector point next-point)
 	prev-segment-v (am:vector prev-point point))
-  (cond ((= prev-point ()) (list (list point (am:normalize (am:scalar-op '* direction (am:rotate90 next-segment-v))))))
-	((= next-point ()) (list (list point (am:normalize (am:scalar-op '* direction (am:rotate90 prev-segment-v))))))
+  (cond ((= prev-point nil) (setq extrude-vector (am:rotate90 next-segment-v)))
+	((= next-point nil) (setq extrude-vector (am:rotate90 prev-segment-v)))
 	(t (progn
-	     (setq curve-direction (am:side next-segment-v prev-segment-v)
-		   same-direction (or (= curve-direction direction) (= curve-direction 0)))
-	     (if same-direction
-	       (list (list point (am:normalize (mapcar '+
-						       (am:normalize (mapcar '- prev-segment-v))
-						       (am:normalize next-segment-v)))))
-	       (list (list point (am:normalize (am:scalar-op '* direction (am:rotate90 prev-segment-v))))
-		       (list point (am:normalize (am:scalar-op '* direction (am:rotate90 next-segment-v))))))))))
+	     (setq full-angle (am:angle-between prev-segment-v
+						(am:scalar-op '* -1 next-segment-v))
+		   half-angle (/ full-angle 2)
+		   extrude-vector (am:rotate-vector prev-segment-v half-angle)))))
+  (list point (am:normalize (am:scalar-op '* direction extrude-vector))))
 
 (defun am:plan-extrusions (edge direction
 			   / segment segment-v next-segment next-segment-v
 			   extrusion-v curve-inside point)
-  (am:flatten-list
-    (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
-	    (append (list nil) edge)
-	    edge
-	    (append (cdr edge) (list nil)))))
+  (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
+	  (append (list nil) edge)
+	  edge
+	  (append (cdr edge) (list nil))))
 
 (defun am:do-extrusion (extrusion block block-ref
 			/ point direction dist upper-point)
@@ -242,10 +267,10 @@
 	left-slope-top (am:extrude-edge left-slope-bottom 1 block block-ref)))
 
 ;allow closed main lines
-;correct slope marking
-;insert hypotenuse for each point
+;slope angles
 ;remove the first point in (getdist) and ask for full width
 ;delete block on object removal
 ;ghost images
 ;control points
+;shade slopes
 ;the shading on slopes should stretch over the whole edge
