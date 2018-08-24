@@ -1,7 +1,11 @@
 (vl-load-com)
 ;;;; constants and utils
 
+(setq am:pointer 320)
+(setq am:float 1040)
+(setq am:distance 1041)
 (setq am:int16 1070)
+
 (setq am:pi/2 (/ pi 2.0))
 (setq am:2pi (* pi 2.0))
 
@@ -13,6 +17,55 @@
       (if (predicate (car objects))
 	  (car objects)
 	  (am:find-if (cdr objects) predicate))))
+
+;;;; persistence
+
+(defun am:get-dictionary (doc
+			  / dictionary-name dictionaries dictionary)
+  (setq dictionary-name "amDictionary"
+  	dictionaries (vla-get-Dictionaries doc)
+  	dictionary (vl-catch-all-apply 'vla-Item (list dictionaries dictionary-name)))
+  (if (= (type dictionary) 'vla-object)
+    dictionary
+    (vla-Add dictionaries dictionary-name)))
+
+(defun am:get-xrecord (dictionary name
+		       / record)
+  (setq record (vl-catch-all-apply 'vla-GetObject (list dictionary name)))
+  (if (= (type record) 'vla-object)
+    record
+    (vla-AddXRecord dictionary name)))
+
+(defun am:get-variable (dictionary name
+			/ record out-type out-value)
+  (setq record (am:get-xrecord dictionary name))
+  (vla-GetXRecordData record 'out-type 'out-value)
+  (if (/= out-value nil)
+    (vlax-variant-value (vlax-safearray-get-element out-value 0))))
+
+(defun am:get-object (dictionary name
+		      / document value)
+  (setq document (vla-get-Document dictionary)
+	value (am:get-variable dictionary name))
+  (if value (vla-HandleToObject document value)))
+
+
+(defun am:set-variable (dictionary name var-type var-value
+			/ record record-type record-value)
+  (if var-value
+      (progn
+	(setq record (am:get-xrecord dictionary name)
+	      record-type (vlax-make-safearray vlax-vbInteger '(0 . 0))
+	      record-value (vlax-make-safearray vlax-vbVariant '(0 . 0)))
+	(vlax-safearray-put-element record-type 0 var-type)
+	(vlax-safearray-put-element record-value 0 var-value)
+	(vla-SetXRecordData record record-type record-value))
+      (vla-Remove dictionary name)))
+
+(defun am:set-object (dictionary name object)
+  (am:set-variable dictionary
+		   name 
+		   am:pointer (vla-get-Handle object)))
 
 ;;;; model
 
@@ -44,6 +97,27 @@
 		       (cons ':block block)
 		       (cons ':block-ref block-ref))))
 
+(defun am:load-trench (dictionary
+		       / document)
+  (am:make-model ':trench
+		 (list (am:make-property ':width "Width" (am:get-variable dictionary "trench-width"))
+		       (am:make-property ':m "m" (am:get-variable dictionary "trench-m")))
+		 (list (cons ':main-line (am:get-object dictionary "trench-main-line"))
+		       (cons ':block (am:get-object dictionary "trench-block"))
+		       (cons ':block-ref (am:get-object dictionary "trench-block-ref")))))
+
+(defun am:save-trench (trench-model dictionary
+		       / properties fields)
+  (setq properties (am:object-get trench-model ':properties)
+	fields (am:object-get trench-model ':fields))
+  (am:set-variable dictionary "trench-width"
+		   am:distance (am:property-get properties ':width))
+  (am:set-variable dictionary "trench-m"
+		   am:float (am:property-get properties ':m))
+  (am:set-object dictionary "trench-main-line" (am:object-get fields ':main-line))
+  (am:set-object dictionary "trench-block" (am:object-get fields ':block))
+  (am:set-object dictionary "trench-block-ref" (am:object-get fields ':block-ref)))
+
 (defun am:make-success (data)
   (cons ':success data))
 
@@ -56,41 +130,6 @@
 (defun am:errorp (result)
   (= ':error (car result)))
 
-;;;; persistence
-
-(defun am:get-dictionary (doc
-			  / dictionary-name dictionaries dictionary)
-  (setq dictionary-name "amDictionary"
-  	dictionaries (vla-get-Dictionaries doc)
-  	dictionary (vl-catch-all-apply 'vla-Item (list dictionaries dictionary-name)))
-  (if (= (type dictionary) 'vla-object)
-    dictionary
-    (vla-Add dictionaries dictionary-name)))
-
-(defun am:get-xrecord (dictionary name
-		       / record)
-  (setq record (vl-catch-all-apply 'vla-GetObject (list dictionary name)))
-  (if (= (type record) 'vla-object)
-    record
-    (vla-AddXRecord dictionary name)))
-
-(defun am:get-variable (doc name
-			/ dictionary record out-type out-value)
-  (setq dictionary (am:get-dictionary doc)
-	record (am:get-xrecord dictionary name))
-  (vla-GetXRecordData record 'out-type 'out-value)
-  (if (/= out-value nil)
-    (vlax-variant-value (vlax-safearray-get-element out-value 0))))
-
-(defun am:set-variable (doc name var-type var-value
-			/ dictionary record record-type record-value)
-  (setq dictionary (am:get-dictionary doc)
-	record (am:get-xrecord dictionary name)
-	record-type (vlax-make-safearray vlax-vbInteger '(0 . 0))
-	record-value (vlax-make-safearray vlax-vbVariant '(0 . 0)))
-  (vlax-safearray-put-element record-type 0 var-type)
-  (vlax-safearray-put-element record-value 0 var-value)
-  (vla-SetXRecordData record record-type record-value))
 
 ;;;; list manipulations
 
@@ -217,16 +256,19 @@
       (am:make-success ())))
 
 (defun am:table-updated (owner reactor-object extra
-			       / reactor-data callout model new-model new-properties)
+			 / reactor-data load-callout callout save-callout model new-model new-properties)
   (setq reactor-data (vlr-data reactor-object)
-	callout (car reactor-data)
-	model (cadr reactor-data)
+	dictionary (am:object-get reactor-data ':dictionary)
+	load-callout (am:object-get reactor-data ':load)
+	callout (am:object-get reactor-data ':modified)
+	save-callout (am:object-get reactor-data ':save)
+	model (load-callout dictionary)
 	new-properties (am:fill-properties owner (am:object-get model ':properties) 1))
   (if (am:successp new-properties)
       (progn
 	(setq new-model (am:make-model (am:object-get model ':name)
-				      (cdr new-properties)
-				      (am:object-get model ':fields)))
+				       (cdr new-properties)
+				       (am:object-get model ':fields)))
 	(callout new-model))))
 
 (defun am:fill-table (table properties row
@@ -240,7 +282,7 @@
 	(vla-SetCellValue table row 1 value)
 	(am:fill-table table (cdr properties) (1+ row)))))
 
-(defun am:create-table (title model modified-callout parent 
+(defun am:create-table (title model load-callout modified-callout save-callout parent 
 			/ point table properties wrapper)
   (setq point (getpoint "Table position")
 	properties (am:object-get model ':properties)
@@ -249,12 +291,17 @@
 			    (1+ (length properties))
 			    2 ;num-columns
 			    1
-			    5))
+			    5)
+	dictionary (vla-GetExtensionDictionary table))
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
   (modified-callout model)
+  (save-callout model dictionary)
   (setq reactor (vlr-object-reactor (list table)
-				    (list modified-callout model)
+				    (list (cons ':dictionary dictionary)
+					  (cons ':load load-callout)
+					  (cons ':modified modified-callout)
+					  (cons ':save save-callout))
 				    (list (cons :vlr-modified 'am:table-updated)))))
 
 ;;;; Drawing
@@ -262,12 +309,12 @@
 (defun am:create-block (doc
 			/ id-name id block-name block)
   (setq id-name "free-block-id"
-	id (am:default (am:get-variable doc id-name) 1)
+	id (am:default (am:get-variable (am:get-dictionary doc) id-name) 1)
 	block-name (strcat "Trench " (itoa id))
 	block (vla-Add (vla-get-Blocks doc)
 		       (vlax-3d-point 0 0 0)
 		       block-name))
-  (am:set-variable doc id-name am:int16 (1+ id))
+  (am:set-variable (am:get-dictionary doc) id-name am:int16 (1+ id))
   block)
 
 (defun am:append-tail (polyline last-position len block-ref
@@ -361,7 +408,24 @@
   (am:connect-extruded extruded-points block block-ref)
   extruded-points)
 
-(defun am:trench-updated (model)
+(defun am:delete-saved-objects (dictionary object-names
+				/ object-name object)
+  (if object-names
+      (progn
+	(setq object-name (car object-names)
+	      object (am:get-object dictionary object-name))
+	(if object
+	    (progn
+	      (vla-Delete object)
+	      (vla-Remove dictionary object-name)))
+	
+	(am:delete-saved-objects dictionary (cdr object-names)))))
+
+(defun am:trench-updated (model
+			  / acad-object doc
+			  fields main-line block block-ref dictionary
+			  properties width m
+			  bottom-edges)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 
@@ -369,11 +433,19 @@
 	main-line (am:object-get fields ':main-line)
 	block (am:object-get fields ':block)
 	block-ref (am:object-get fields ':block-ref)
+        dictionary (vla-GetExtensionDictionary main-line)
 
 	properties (am:object-get model ':properties)
-	width (am:property-get properties ':width)
+	width (am:property-get properties ':width))
 
-	bottom-edges (am:add-width main-line width block-ref)))
+  (am:delete-saved-objects dictionary '("bottom-edge-right"
+					"bottom-edge-left"))
+  (vla-Update block-ref)
+
+  (setq bottom-edges (am:add-width main-line width block-ref))
+
+  (am:set-object dictionary "bottom-edge-right" (car bottom-edges))
+  (am:set-object dictionary "bottom-edge-left" (cadr bottom-edges)))
 
 (defun am:trench (/ acad-object doc start end model-space
 		  block block-ref start main-line	
@@ -397,7 +469,9 @@
 	)
   (am:create-table "Trench parameters"
 		   (am:make-trench-model main-line block block-ref)
+		   am:load-trench
 		   am:trench-updated
+		   am:save-trench
 		   model-space))
 
 ;allow closed main lines
