@@ -18,6 +18,23 @@
 	  (car objects)
 	  (am:find-if (cdr objects) predicate))))
 
+(defun am:aggregate (lst fn initial)
+  (if lst
+      (am:aggregate (cdr lst)
+		    fn
+		    (fn initial (car lst)))
+      initial))
+
+(defun am:max (lst)
+  (am:aggregate lst
+                (lambda (acc next) (if (> next acc) next acc))
+                ()))
+
+(defun am:seq (low high)
+  (if (> low high)
+      ()
+      (cons low (am:seq (1+ low) high))))
+
 ;;;; persistence
 
 (defun am:get-dictionary (doc
@@ -67,22 +84,46 @@
 		   name 
 		   am:pointer (vla-get-Handle object)))
 
-;;;; model
+;;;; Model
 
 (defun am:object-get (object field)
   (cdr (assoc field object)))
+
+(defun am:make-property (name display value)
+  (list (cons ':property-type ':property)
+	(cons ':name name)
+	(cons ':display display)
+	(cons ':value value)
+	(cons ':column-count 1)))
+
+(defun am:make-column (name display)
+  (list (cons ':name name)
+	(cons ':display display)))
+
+(defun am:make-composite-property (name display columns rows)
+  (list (cons ':property-type ':composite-property)
+	(cons ':name name)
+	(cons ':display display)
+	(cons ':columns columns)
+	(cons ':rows rows)
+	(cons ':column-count (length columns))))
+
+(defun am:property-p (property)
+  (= (am:object-get property ':property-type) ':property))
+
+(defun am:composite-property-p (property)
+  (= (am:object-get property ':property-type) ':composite-property))
 
 (defun am:property-find (properties name)
   (am:find-if properties
     	      (lambda (property) (= (am:object-get property ':name) name))))
 
-(defun am:property-get (properties name)
-  (am:object-get (am:property-find properties name) ':value))
-
-(defun am:make-property (name display value)
-  (list (cons ':name name)
-	(cons ':display display)
-	(cons ':value value)))
+(defun am:property-get (properties name
+			/ property)
+  (setq property (am:property-find properties name))
+  (if (am:property-p property)
+      (am:object-get property ':value)
+      (am:object-get property ':rows)))
 
 (defun am:make-model (model-name properties fields)
   (list (cons ':name model-name)
@@ -91,20 +132,58 @@
 
 (defun am:make-trench-model (main-line block block-ref)
   (am:make-model ':trench
-		 (list (am:make-property ':width "Width" 1.0)
-		       (am:make-property ':m "m" 0.66))
+		 (append
+		  (list (am:make-property ':width "Width" 1.0)
+			(am:make-property ':m "m" 0.66)
+			(am:make-composite-property
+			 ':height-map
+			 "Height"
+			 (list (am:make-column ':bottom "Bottom")
+			       (am:make-column ':top "Top"))
+			 (mapcar '(lambda (_)
+				    (list (cons ':bottom 0.0)
+					  (cons ':top 3.0)))
+				 (am:pairs (am:variant->list (vla-get-Coordinates main-line)))))))
 		 (list (cons ':main-line main-line)
 		       (cons ':block block)
 		       (cons ':block-ref block-ref))))
+
+(defun am:load-trench-height-map (dictionary)
+  (mapcar '(lambda (index)
+	     (list (cons ':top (am:get-variable dictionary
+						(strcat "trench-heights-bottom-" (itoa index))))
+		   (cons ':bottom (am:get-variable dictionary
+						(strcat "trench-heights-top-" (itoa index))))))
+	  (am:seq 1 (am:get-variable dictionary "trench-heights-length"))))
 
 (defun am:load-trench (dictionary
 		       / document)
   (am:make-model ':trench
 		 (list (am:make-property ':width "Width" (am:get-variable dictionary "trench-width"))
-		       (am:make-property ':m "m" (am:get-variable dictionary "trench-m")))
+		       (am:make-property ':m "m" (am:get-variable dictionary "trench-m"))
+		       (am:make-composite-property ':height-map
+						   "Heights"
+						   (list (am:make-column ':top "Top")
+							 (am:make-column ':bottom "Bottom"))
+						   (am:load-trench-height-map dictionary)))
 		 (list (cons ':main-line (am:get-object dictionary "trench-main-line"))
 		       (cons ':block (am:get-object dictionary "trench-block"))
 		       (cons ':block-ref (am:get-object dictionary "trench-block-ref")))))
+
+(defun am:save-trench-height-map (dictionary height-map)
+  (am:set-variable dictionary "trench-heights-length"
+		   am:int16 (length height-map))
+  (mapcar '(lambda (heights i)
+	     (am:set-variable dictionary
+			      (strcat "trench-heights-bottom-" (itoa i))
+			      am:float
+			      (am:object-get heights ':bottom))
+	     (am:set-variable dictionary
+			      (strcat "trench-heights-top-" (itoa i))
+			      am:float
+			      (am:object-get heights ':top)))
+	  height-map
+	  (am:seq 1 (length height-map))))
 
 (defun am:save-trench (trench-model dictionary
 		       / properties fields)
@@ -114,6 +193,7 @@
 		   am:distance (am:property-get properties ':width))
   (am:set-variable dictionary "trench-m"
 		   am:float (am:property-get properties ':m))
+  (am:save-trench-height-map dictionary (am:property-get properties ':height-map))
   (am:set-object dictionary "trench-main-line" (am:object-get fields ':main-line))
   (am:set-object dictionary "trench-block" (am:object-get fields ':block))
   (am:set-object dictionary "trench-block-ref" (am:object-get fields ':block-ref)))
@@ -230,29 +310,55 @@
 
 ;;;; User input
 
-(defun am:fill-properties (table properties row
-  			   / property display
-			   table-display table-value tail-results)
+(defun am:read-simple-property (table property row
+			        / display table-display)
+  (setq display (am:object-get property ':display)
+	table-display (vla-GetText table row 0)
+	table-value (vla-GetCellValue table row 1))
+  (if (/= display table-display)
+      (am:make-error "invalid table property name")
+      (am:make-success (am:make-property (am:object-get property ':name)
+					 display
+					 (vlax-variant-value table-value)))))
+
+(defun am:read-composite-property-row (table columns row-index)
+  (mapcar '(lambda (column column-index)
+	     (cons (am:object-get column ':name)
+		   (vlax-variant-value (vla-GetCellValue table row-index column-index))))
+	  columns
+	  (am:seq 1 (length columns))))
+
+(defun am:read-composite-property (table property row
+				   / rows columns row-index)
+  (setq rows (am:object-get property ':rows)
+	columns (am:object-get property ':columns))
+  (am:make-success
+   (am:make-composite-property
+    (am:object-get property ':name)
+    (am:object-get property ':display)
+    columns
+    (mapcar '(lambda (row row-index)
+	       (am:read-composite-property-row table columns row-index))
+	    rows
+	    (am:seq (1+ row) (+ 1 row (length rows)))))))
+
+(defun am:read-table (table properties row
+  		      / property display
+		      table-display table-value property-result tail-results)
   (if properties
       (progn
 	(setq property (car properties)
-	      display (am:object-get property ':display)
-	      table-display (vla-GetText table row 0)
-	      table-value (vla-GetCellValue table row 1))
-	(if (/= display table-display)
-	    (am:make-error "invalid table property name")
+	      property-result (if (am:property-p property)
+				  (am:read-simple-property table property row)
+				  (am:read-composite-property table property row)))
+	(if (am:errorp property-result)
+	    property-result
 	    (progn
-	      (setq tail-results (am:fill-properties
-				  table
-				  (cdr properties)
-				  (1+ row)))
+	      (setq tail-results (am:read-table table (cdr properties) (1+ row)))
 	      (if (am:errorp tail-results)
 		  tail-results
-		  (am:make-success
-		   (cons (am:make-property (am:object-get property ':name)
-					   display
-					   (vlax-variant-value table-value))
-			 (cdr tail-results)))))))
+		  (am:make-success (cons (cdr property-result)
+					 (cdr tail-results)))))))
       (am:make-success ())))
 
 (defun am:table-updated (owner reactor-object extra
@@ -263,7 +369,7 @@
 	callout (am:object-get reactor-data ':modified)
 	save-callout (am:object-get reactor-data ':save)
 	model (load-callout dictionary)
-	new-properties (am:fill-properties owner (am:object-get model ':properties) 1))
+	new-properties (am:read-table owner (am:object-get model ':properties) 1))
   (if (am:successp new-properties)
       (progn
 	(setq new-model (am:make-model (am:object-get model ':name)
@@ -271,16 +377,85 @@
 				       (am:object-get model ':fields)))
 	(callout new-model))))
 
+(defun am:fill-simple-property (table property row)
+  (vla-SetText table row 0 (am:object-get property ':display))
+  (vla-SetCellValue table row 1 (am:object-get property ':value)))
+
+(defun am:fill-composite-property-header (table columns row column)
+  (if columns
+      (progn
+	(vla-SetText table row column (am:object-get (car columns) ':display))
+	(am:fill-composite-property-header table
+					   (cdr columns)
+					   row
+					   (1+ column)))))
+(defun am:fill-composite-property-cells (table columns row row-index column-index
+					/ column value)
+  (if columns
+      (progn
+	(setq column (car columns)
+	      value (am:object-get row (am:object-get column ':name)))
+	(vla-SetCellValue table row-index column-index value)
+	(am:fill-composite-property-cells table
+					  (cdr columns)
+					  row
+					  row-index
+					  (1+ column-index)))))
+
+(defun am:fill-composite-property-rows (table columns rows header-index property-index
+				       / row-index)
+  (if rows
+      (progn
+	(setq row-index (+ header-index property-index))
+	(vla-SetText table row-index 0 property-index)
+	(am:fill-composite-property-cells table
+					  columns
+					  (car rows)
+					  row-index
+					  1)
+	(am:fill-composite-property-rows table
+					 columns
+					 (cdr rows)
+					 header-index
+					 (1+ property-index)))))
+
+(defun am:fill-composite-property (table property row)
+  (vla-SetText table row 0 (am:object-get property ':display))
+  (am:fill-composite-property-header table
+				     (am:object-get property ':columns)
+				     row
+				     1)
+  (am:fill-composite-property-rows table
+				   (am:object-get property ':columns)
+				   (am:object-get property ':rows)
+				   row
+				   1)
+  (+ 1 row (length (am:object-get property ':rows))))
+
 (defun am:fill-table (table properties row
-		      / property display value)
+		      / property)
   (if properties
       (progn
-	(setq property (car properties)
-	      display (am:object-get property ':display)
-	      value (am:object-get property ':value))
-	(vla-SetText table row 0 display)
-	(vla-SetCellValue table row 1 value)
+	(setq property (car properties))
+	(if (am:property-p property)
+	    (am:fill-simple-property table property row)
+	    (am:fill-composite-property table property row))
 	(am:fill-table table (cdr properties) (1+ row)))))
+
+(defun am:calculate-table-rows (properties)
+  (am:aggregate properties
+		(lambda (acc property)
+		  (if (am:property-p property)
+		      (1+ acc)
+		      (+ 1 acc (length (am:object-get property ':rows)))))
+		1))
+
+(defun am:calculate-table-columns (properties)
+  (1+ (am:max (mapcar '(lambda (property)
+			 (if (am:property-p property)
+			     1
+			     (am:object-get property ':column-count)))
+		      properties))))
 
 (defun am:create-table (title model load-callout modified-callout save-callout parent 
 			/ point table properties wrapper)
@@ -288,8 +463,8 @@
 	properties (am:object-get model ':properties)
 	table (vla-AddTable parent
 			    (vlax-3d-point point)
-			    (1+ (length properties))
-			    2 ;num-columns
+			    (am:calculate-table-rows properties)
+			    (am:calculate-table-columns properties)
 			    1
 			    5)
 	dictionary (vla-GetExtensionDictionary table))
@@ -343,26 +518,15 @@
   (setq offset (/ width 2)
 	offset+ (vlax-variant-value (vla-Offset main-line offset))
 	offset- (vlax-variant-value (vla-Offset main-line (- offset))))
-  (vla-Update block-ref)
   (list (vlax-safearray-get-element offset+ 0)
 	(vlax-safearray-get-element offset- 0)))
-
-(defun am:extrude-point (point block block-ref
-			 / upper-point)
-  (setq upper-point (getpoint point "Height")
-	new-line (vla-AddLine block
-		   	      (vlax-3d-point (append point '(0)))
-		              (vlax-3d-point upper-point)))
-  (vla-Update block-ref)
-  upper-point)
 
 (defun am:connect-extruded (points block block-ref
 			    / array flat-list)
   (setq array (vlax-make-safearray vlax-vbDouble (cons 0 (1- (* 2 (length points)))))
 	flat-list (am:flatten-list (mapcar 'am:flatten-point points)))
   (vlax-safearray-fill array flat-list)
-  (vla-AddLightweightPolyline block array)
-  (vla-Update block-ref))
+  (vla-AddLightweightPolyline block array))
 
 (defun am:plan-extrusion (prev-point point next-point direction
 			  / next-segment-v prev-segment-v extruded-vector
@@ -378,54 +542,54 @@
 		   extrude-vector (am:rotate-vector prev-segment-v half-angle)))))
   (list point (am:normalize (am:scalar-op '* direction extrude-vector))))
 
-(defun am:plan-extrusions (edge direction
-			   / segment segment-v next-segment next-segment-v
-			   extrusion-v curve-inside point)
+(defun am:plan-extrusions (edge direction)
   (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
 	  (append (list nil) edge)
 	  edge
 	  (append (cdr edge) (list nil))))
 
-(defun am:do-extrusion (extrusion block block-ref
+(defun am:do-extrusion (extrusion m heights block block-ref
 			/ point direction dist upper-point)
   (setq point (car extrusion)
 	direction (cadr extrusion)
-	dist (getdist point "Height")
-	upper-point (mapcar '+ point (mapcar '(lambda (x) (* dist x)) direction)))
+	dist (* m (- (am:object-get heights ':top)
+		     (am:object-get heights ':bottom)))
+	upper-point (mapcar '+
+			    point
+			    (mapcar '(lambda (x) (* dist x))
+				    direction)))
   (vla-AddLine block
     (vlax-3d-point (append point '(0)))
     (vlax-3d-point upper-point))
-  (vla-Update block-ref)
   upper-point)
 
-(defun am:extrude-edge (edge direction block block-ref
-			    / edge-points extrusions extruded-points extrusion)
+(defun am:extrude-edge (edge direction m height-map block block-ref
+			/ edge-points extrusions extruded-points extrusion)
   (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
 	extrusions (am:plan-extrusions edge-points direction)
-	extruded-points (mapcar '(lambda (extrusion)
-				   (am:do-extrusion extrusion block block-ref))
-				extrusions))
+	extruded-points (mapcar '(lambda (extrusion heights)
+				   (am:do-extrusion extrusion m heights block block-ref))
+				extrusions
+				height-map))
   (am:connect-extruded extruded-points block block-ref)
   extruded-points)
 
-(defun am:delete-saved-objects (dictionary object-names
-				/ object-name object)
-  (if object-names
-      (progn
-	(setq object-name (car object-names)
-	      object (am:get-object dictionary object-name))
-	(if object
-	    (progn
-	      (vla-Delete object)
-	      (vla-Remove dictionary object-name)))
-	
-	(am:delete-saved-objects dictionary (cdr object-names)))))
+(defun am:clear-trench (main-line block block-ref
+			/ i id item)
+  (setq i (1- (vla-get-Count block))
+	id (vla-get-ObjectId main-line))
+  (while (>= i 0)
+    (setq item (vla-Item block i))
+    (if (/= (vla-get-ObjectId item) id)
+	(vla-Delete item))
+    (setq i (1- i))))
 
 (defun am:trench-updated (model
 			  / acad-object doc
 			  fields main-line block block-ref dictionary
-			  properties width m
-			  bottom-edges)
+			  properties width m height-map
+			  bottom-edges bottom-edge-right bottom-edge-left
+			  top-edge-right top-edge-left)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 
@@ -433,19 +597,22 @@
 	main-line (am:object-get fields ':main-line)
 	block (am:object-get fields ':block)
 	block-ref (am:object-get fields ':block-ref)
-        dictionary (vla-GetExtensionDictionary main-line)
+        dictionary (vla-GetExtensionDictionary block)
 
 	properties (am:object-get model ':properties)
-	width (am:property-get properties ':width))
+	width (am:property-get properties ':width)
+	m (am:property-get properties ':m)
+	height-map (am:property-get properties ':height-map))
 
-  (am:delete-saved-objects dictionary '("bottom-edge-right"
-					"bottom-edge-left"))
-  (vla-Update block-ref)
+  (am:clear-trench main-line block block-ref)
 
-  (setq bottom-edges (am:add-width main-line width block-ref))
+  (setq bottom-edges (am:add-width main-line width block-ref)
+	bottom-edge-right (car bottom-edges)
+	bottom-edge-left (cadr bottom-edges)
+        top-edge-right (am:extrude-edge bottom-edge-right 1 m height-map block block-ref)
+	top-edge-left (am:extrude-edge bottom-edge-left -1 m height-map block block-ref))
 
-  (am:set-object dictionary "bottom-edge-right" (car bottom-edges))
-  (am:set-object dictionary "bottom-edge-left" (cadr bottom-edges)))
+  (vla-Update block-ref))
 
 (defun am:trench (/ acad-object doc start end model-space
 		  block block-ref start main-line	
@@ -459,14 +626,7 @@
                   (vlax-3d-point 0 0 0)
                   (vla-get-Name block)
                   1 1 1 0)
-	main-line (am:construct-main-line doc block block-ref)
-;	start (am:variant->list (vla-get-Coordinate main-line 0))
-;	bottom-edges (am:add-width main-line start block-ref)
-;	right-slope-bottom (car bottom-edges)
-;	left-slope-bottom (cadr bottom-edges)
-;	right-slope-top (am:extrude-edge right-slope-bottom -1 block block-ref)
-;	left-slope-top (am:extrude-edge left-slope-bottom 1 block block-ref)
-	)
+	main-line (am:construct-main-line doc block block-ref))
   (am:create-table "Trench parameters"
 		   (am:make-trench-model main-line block block-ref)
 		   am:load-trench
@@ -474,11 +634,8 @@
 		   am:save-trench
 		   model-space))
 
+;allow save-loading
 ;allow closed main lines
-;slope angles
-;remove the first point in (getdist) and ask for full width
 ;delete block on object removal
-;ghost images
-;control points
 ;shade slopes
 ;the shading on slopes should stretch over the whole edge
