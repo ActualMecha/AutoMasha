@@ -634,8 +634,14 @@
 		   am:save-trench
 		   model-space))
 
-;allow save-loading
-;allow closed main lines
-;delete block on object removal
-;shade slopes
-;the shading on slopes should stretch over the whole edge
+;;;;
+;;variadic number of the main line lines
+;;allow save-loading
+;;allow closed main lines
+;;delete block on object removal
+;;shade slopes
+;;make the slope shading available as a separate command
+;;the shading on slopes should stretch over the whole edge
+;;move user input from table to the ribbon
+;;input validation
+;;optionally add slopes on trench's ends
