@@ -494,13 +494,16 @@
 
 (defun am:append-tail (polyline last-position len block-ref
 		       / next-position point)
-  (setq next-position (am:flatten-point (getpoint last-position "Next segment"))
-	point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
-  (vlax-safearray-fill point next-position)
-  (vla-AddVertex polyline len point)
-  (vla-Update block-ref)
-  (if (< len 1)
-    (am:append-tail polyline next-position (1+ len) block-ref)))
+  (initget 1 "Stop")
+  (setq input (getpoint last-position "Next segment or [Stop]"))
+  (if (not (equal input "Stop"))
+      (progn
+	(setq next-position (am:flatten-point input)
+	      point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
+	(vlax-safearray-fill point next-position)
+	(vla-AddVertex polyline len point)
+	(vla-Update block-ref)
+	(am:append-tail polyline next-position (1+ len) block-ref))))
 
 (defun am:construct-main-line (doc block block-ref
 			       / start first points polyline)
@@ -635,7 +638,6 @@
 		   model-space))
 
 ;;;;
-;;variadic number of the main line lines
 ;;allow save-loading
 ;;allow closed main lines
 ;;delete block on object removal
