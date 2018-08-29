@@ -493,18 +493,26 @@
   (am:set-variable (am:get-dictionary doc) id-name am:int16 (1+ id))
   block)
 
-(defun am:append-tail (polyline last-position len block-ref
+(defun am:append-tail (polyline first-position last-position len block-ref
 		       / next-position point)
-  (initget 1 "Stop")
-  (setq input (getpoint last-position "Next segment or [Stop]"))
-  (if (not (equal input "Stop"))
-      (progn
-	(setq next-position (am:flatten-point input)
-	      point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
-	(vlax-safearray-fill point next-position)
-	(vla-AddVertex polyline len point)
-	(vla-Update block-ref)
-	(am:append-tail polyline next-position (1+ len) block-ref))))
+  (initget 1 "Stop Close")
+  (setq input (getpoint last-position "Next segment or [Stop/Close]")
+	next-position (cond ((equal input "Stop") ())
+			    ((equal input "Close") first-position)
+			    (t (am:flatten-point input))))
+  (cond ((equal next-position first-position)
+	 (vla-put-Closed polyline :vlax-true)
+	 (vla-Update block-ref))
+	(next-position
+	 (setq point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
+	 (vlax-safearray-fill point next-position)
+	 (vla-AddVertex polyline len point)
+	 (vla-Update block-ref)
+	 (am:append-tail polyline
+			 first-position
+			 next-position
+			 (1+ len)
+			 block-ref))))
 
 (defun am:construct-main-line (doc block block-ref
 			       / start first points polyline)
@@ -514,7 +522,7 @@
   (vlax-safearray-fill points (append start first))
   (setq polyline (vla-AddLightweightPolyline block points))
   (vla-Update block-ref)
-  (am:append-tail polyline first 2 block-ref)
+  (am:append-tail polyline start first 2 block-ref)
   polyline)
 
 (defun am:add-width (main-line width block-ref
@@ -546,6 +554,12 @@
 		   extrude-vector (am:rotate-vector prev-segment-v half-angle)))))
   (list point (am:normalize (am:scalar-op '* direction extrude-vector))))
 
+(defun am:plan-closed-extrusions (edge direction)
+  (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
+	  (cons (last edge) edge)
+	  edge
+	  (append (cdr edge) (list (car edge)))))
+
 (defun am:plan-extrusions (edge direction)
   (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
 	  (append (list nil) edge)
@@ -570,11 +584,16 @@
 (defun am:extrude-edge (edge direction m height-map block block-ref
 			/ edge-points extrusions extruded-points extrusion)
   (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
-	extrusions (am:plan-extrusions edge-points direction)
+	closed (= :vlax-true (vla-get-Closed edge))
+	extrusions (if closed
+		       (am:plan-closed-extrusions edge-points direction)
+		       (am:plan-extrusions edge-points direction))
 	extruded-points (mapcar '(lambda (extrusion heights)
 				   (am:do-extrusion extrusion m heights block block-ref))
 				extrusions
 				height-map))
+  (if closed
+      (setq extruded-points (append extruded-points (list (car extruded-points)))))
   (am:connect-extruded extruded-points block block-ref)
   extruded-points)
 
@@ -639,8 +658,8 @@
 		   model-space))
 
 ;;;;
+;;add numbers to the main line vertices
 ;;allow save-loading
-;;allow closed main lines
 ;;delete block on object removal
 ;;shade slopes
 ;;make the slope shading available as a separate command
