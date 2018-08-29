@@ -150,9 +150,9 @@
 
 (defun am:load-trench-height-map (dictionary)
   (mapcar '(lambda (index)
-	     (list (cons ':top (am:get-variable dictionary
-						(strcat "trench-heights-bottom-" (itoa index))))
-		   (cons ':bottom (am:get-variable dictionary
+	     (list (cons ':bottom (am:get-variable dictionary
+						   (strcat "trench-heights-bottom-" (itoa index))))
+		   (cons ':top (am:get-variable dictionary
 						(strcat "trench-heights-top-" (itoa index))))))
 	  (am:seq 1 (am:get-variable dictionary "trench-heights-length"))))
 
@@ -163,8 +163,8 @@
 		       (am:make-property ':m "m" (am:get-variable dictionary "trench-m"))
 		       (am:make-composite-property ':height-map
 						   "Heights"
-						   (list (am:make-column ':top "Top")
-							 (am:make-column ':bottom "Bottom"))
+						   (list (am:make-column ':bottom "Bottom")
+							 (am:make-column ':top "Top"))
 						   (am:load-trench-height-map dictionary)))
 		 (list (cons ':main-line (am:get-object dictionary "trench-main-line"))
 		       (cons ':block (am:get-object dictionary "trench-block"))
@@ -389,6 +389,7 @@
 					   (cdr columns)
 					   row
 					   (1+ column)))))
+
 (defun am:fill-composite-property-cells (table columns row row-index column-index
 					/ column value)
   (if columns
@@ -612,8 +613,8 @@
   (setq bottom-edges (am:add-width main-line width block-ref)
 	bottom-edge-right (car bottom-edges)
 	bottom-edge-left (cadr bottom-edges)
-        top-edge-right (am:extrude-edge bottom-edge-right 1 m height-map block block-ref)
-	top-edge-left (am:extrude-edge bottom-edge-left -1 m height-map block block-ref))
+        top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map block block-ref)
+	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map block block-ref))
 
   (vla-Update block-ref))
 
