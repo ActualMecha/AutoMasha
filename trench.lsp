@@ -493,6 +493,15 @@
   (am:set-variable (am:get-dictionary doc) id-name am:int16 (1+ id))
   block)
 
+(defun am:create-subblock (parent-block child-name
+			   / doc parent-name)
+  (setq doc (vla-get-Document parent-block)
+	parent-name (vla-get-Name parent-block)
+	child-name (strcat parent-name "-" child-name))
+  (vla-Add (vla-get-Blocks doc)
+	   (vlax-3d-point 0 0 0)
+	   child-name))	
+
 (defun am:append-tail (polyline first-position last-position len block-ref
 		       / next-position point)
   (initget 1 "Stop Close")
@@ -581,30 +590,84 @@
     (vlax-3d-point upper-point))
   upper-point)
 
-(defun am:extrude-edge (edge direction m height-map block block-ref
+(defun am:shade-slope (bottom next-bottom top next-top block
+		       / step top-vector top-unit-vector top-length
+		       count)
+  (setq step 0.3
+	top-vector (am:vector top next-top)
+	top-unit-vector (am:normalize top-vector)
+	shading-unit-vector (am:rotate90 top-unit-vector)
+	top-length (am:length top-vector)
+	count (- (fix top-length) 1))
+  (mapcar '(lambda (i
+		    / shade-origin shade-end inters-line-1 inters-line-2)
+	     (setq shade-origin (mapcar '+
+					top
+					(am:scalar-op '* top-unit-vector i))
+		   shade-end (inters shade-origin
+				     (mapcar '+ shade-origin shading-unit-vector)
+				     bottom
+				     next-bottom
+				     nil))
+	     (if (= 1 (rem i 2))
+		 (setq shade-end (mapcar '+
+					 shade-origin
+					 (am:scalar-op '/
+						       (am:vector shade-origin shade-end)
+						       2.0))))
+	     (setq inters-line-1 (inters shade-origin
+					 shade-end
+					 top
+					 bottom)
+		   inters-line-2 (inters shade-origin
+					 shade-end
+					 next-top
+					 next-bottom)
+		   shade-end (cond (inters-line-1 inters-line-1)
+				   (inters-line-2 inters-line-2)
+				   (t shade-end)))
+	     (vla-AddLine block
+			  (vlax-3d-point shade-origin)
+			  (vlax-3d-point shade-end)))
+	  (am:seq 1 (1+ count))))
+
+(defun am:extrude-edge (edge direction m height-map shading-block block block-ref
 			/ edge-points extrusions extruded-points extrusion)
   (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
 	closed (= :vlax-true (vla-get-Closed edge))
 	extrusions (if closed
-		       (am:plan-closed-extrusions edge-points direction)
+		       (am:plan-closed-extrusions edge-points)
 		       (am:plan-extrusions edge-points direction))
 	extruded-points (mapcar '(lambda (extrusion heights)
 				   (am:do-extrusion extrusion m heights block block-ref))
 				extrusions
 				height-map))
   (if closed
-      (setq extruded-points (append extruded-points (list (car extruded-points)))))
+      (setq extruded-points (append extruded-points (list (car extruded-points)))
+	    edge-points (append edge-points (list car edge-points))))
   (am:connect-extruded extruded-points block block-ref)
+  (setq segments (mapcar '(lambda (point next-point extruded next-extruded)
+			    (am:shade-slope point next-point extruded next-extruded shading-block))
+			 edge-points
+			 (cdr edge-points)
+			 extruded-points
+			 (cdr extruded-points)))
   extruded-points)
 
 (defun am:clear-trench (main-line block block-ref
-			/ i id item)
+			/ i id item block-name)
   (setq i (1- (vla-get-Count block))
 	id (vla-get-ObjectId main-line))
   (while (>= i 0)
-    (setq item (vla-Item block i))
+    (setq item (vla-Item block i)
+	  block-name (if (= "AcDbBlockReference" (vla-get-ObjectName item))
+			 (vla-get-EffectiveName item)))
     (if (/= (vla-get-ObjectId item) id)
 	(vla-Delete item))
+    (if block-name
+	(vla-Delete (vla-Item
+		     (vla-get-Blocks (vla-get-Document block))
+		     block-name)))
     (setq i (1- i))))
 
 (defun am:trench-updated (model
@@ -632,8 +695,14 @@
   (setq bottom-edges (am:add-width main-line width block-ref)
 	bottom-edge-right (car bottom-edges)
 	bottom-edge-left (cadr bottom-edges)
-        top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map block block-ref)
-	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map block block-ref))
+	shading-block (am:create-subblock block "shading")
+        top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map shading-block block block-ref)
+	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map shading-block block block-ref))
+
+  (vla-InsertBlock block
+                  (vlax-3d-point 0 0 0)
+                  (vla-get-Name shading-block)
+                  1 1 1 0)
 
   (vla-Update block-ref))
 
