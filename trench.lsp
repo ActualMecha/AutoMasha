@@ -361,7 +361,7 @@
 					 (cdr tail-results)))))))
       (am:make-success ())))
 
-(defun am:table-updated (owner reactor-object extra
+(defun am:table-updated (owner reactor-object
 			 / reactor-data load-callout callout save-callout model new-model new-properties)
   (setq reactor-data (vlr-data reactor-object)
 	dictionary (am:object-get reactor-data ':dictionary)
@@ -375,7 +375,16 @@
 	(setq new-model (am:make-model (am:object-get model ':name)
 				       (cdr new-properties)
 				       (am:object-get model ':fields)))
-	(callout new-model))))
+	(callout new-model)
+	(save-callout new-model dictionary))))
+
+(defun am:table-erased (reactor-object)
+  ())
+
+(defun am:table-modified (owner reactor-object extra)
+  (if (vlax-erased-p owner)
+      (am:table-erased reactor-object)
+      (am:table-updated owner reactor-object)))
 
 (defun am:fill-simple-property (table property row)
   (vla-SetText table row 0 (am:object-get property ':display))
@@ -458,7 +467,7 @@
 			     (am:object-get property ':column-count)))
 		      properties))))
 
-(defun am:create-table (title model load-callout modified-callout save-callout parent 
+(defun am:create-table (title model dictionary load-callout modified-callout save-callout parent 
 			/ point table properties wrapper)
   (setq point (getpoint "Table position")
 	properties (am:object-get model ':properties)
@@ -467,8 +476,7 @@
 			    (am:calculate-table-rows properties)
 			    (am:calculate-table-columns properties)
 			    1
-			    5)
-	dictionary (vla-GetExtensionDictionary table))
+			    5))
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
   (modified-callout model)
@@ -478,7 +486,7 @@
 					  (cons ':load load-callout)
 					  (cons ':modified modified-callout)
 					  (cons ':save save-callout))
-				    (list (cons :vlr-modified 'am:table-updated)))))
+				    (list (cons :vlr-modified 'am:table-modified)))))
 
 ;;;; Drawing
 
@@ -500,7 +508,7 @@
 	child-name (strcat parent-name "-" child-name))
   (vla-Add (vla-get-Blocks doc)
 	   (vlax-3d-point 0 0 0)
-	   child-name))	
+	   child-name))
 
 (defun am:append-tail (polyline first-position last-position len block-ref
 		       / next-position point)
@@ -672,7 +680,7 @@
 
 (defun am:trench-updated (model
 			  / acad-object doc
-			  fields main-line block block-ref dictionary
+			  fields main-line block block-ref
 			  properties width m height-map
 			  bottom-edges bottom-edge-right bottom-edge-left
 			  top-edge-right top-edge-left)
@@ -683,7 +691,6 @@
 	main-line (am:object-get fields ':main-line)
 	block (am:object-get fields ':block)
 	block-ref (am:object-get fields ':block-ref)
-        dictionary (vla-GetExtensionDictionary block)
 
 	properties (am:object-get model ':properties)
 	width (am:property-get properties ':width)
@@ -706,8 +713,24 @@
 
   (vla-Update block-ref))
 
+(defun am:edit-trench (/ acad-object doc model-space
+			 model block-ref dictionary)
+  (setq acad-object (vlax-get-acad-object)
+	doc (vla-get-ActiveDocument acad-object)
+	model-space (vla-get-ModelSpace doc)
+	block-ref (vlax-ename->vla-object (car (entsel "Trench block")))
+	dictionary (vla-GetExtensionDictionary block-ref)
+	model (am:load-trench dictionary))
+  (am:create-table "Trench parameters"
+		   model
+		   dictionary
+		   am:load-trench
+		   am:trench-updated
+		   am:save-trench
+		   model-space))
+
 (defun am:trench (/ acad-object doc start end model-space
-		  block block-ref start main-line	
+		  block block-ref start main-line trench-model	
 		  bottom-edges right-slope-bottom left-slope-bottom
 		  right-slope-top left-slope-top)
   (setq acad-object (vlax-get-acad-object)
@@ -718,9 +741,11 @@
                   (vlax-3d-point 0 0 0)
                   (vla-get-Name block)
                   1 1 1 0)
-	main-line (am:construct-main-line doc block block-ref))
+	main-line (am:construct-main-line doc block block-ref)
+	trench-model (am:make-trench-model main-line block block-ref))
   (am:create-table "Trench parameters"
-		   (am:make-trench-model main-line block block-ref)
+		   trench-model
+		   (vla-GetExtensionDictionary block-ref)
 		   am:load-trench
 		   am:trench-updated
 		   am:save-trench
@@ -730,9 +755,7 @@
 ;;add numbers to the main line vertices
 ;;allow save-loading
 ;;delete block on object removal
-;;shade slopes
 ;;make the slope shading available as a separate command
-;;the shading on slopes should stretch over the whole edge
 ;;move user input from table to the ribbon
 ;;input validation
 ;;optionally add slopes on trench's ends
