@@ -379,7 +379,13 @@
 	(save-callout new-model dictionary))))
 
 (defun am:table-erased (reactor-object)
-  ())
+  (setq reactor-data (vlr-data reactor-object)
+	legend-block (am:object-get reactor-data ':legend-block)
+	legend-block-ref (am:object-get reactor-data ':legend-block-ref))
+  (if (not (vlax-erased-p legend-block-ref))
+      (vla-Delete legend-block-ref))
+  (if (not (vlax-erased-p legend-block))
+      (vla-Delete legend-block)))
 
 (defun am:table-modified (owner reactor-object extra)
   (if (vlax-erased-p owner)
@@ -467,8 +473,10 @@
 			     (am:object-get property ':column-count)))
 		      properties))))
 
-(defun am:create-table (title model dictionary load-callout modified-callout save-callout parent 
-			/ point table properties wrapper)
+(defun am:create-table (title model dictionary load-callout modified-callout
+			save-callout draw-legend-block parent 
+			/ doc point table properties wrapper block
+			legend-block legend-block-name legend-block-ref)
   (setq point (getpoint "Table position")
 	properties (am:object-get model ':properties)
 	table (vla-AddTable parent
@@ -476,7 +484,13 @@
 			    (am:calculate-table-rows properties)
 			    (am:calculate-table-columns properties)
 			    1
-			    5))
+			    5)
+	legend-block (draw-legend-block model)
+	legend-block-name (vla-get-Name legend-block)
+	legend-block-ref (vla-InsertBlock model-space
+					  (vlax-3d-point 0 0 0)
+					  legend-block-name
+					  1 1 1 0))
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
   (modified-callout model)
@@ -485,19 +499,33 @@
 				    (list (cons ':dictionary dictionary)
 					  (cons ':load load-callout)
 					  (cons ':modified modified-callout)
+					  (cons ':legend-block legend-block)
+					  (cons ':legend-block-ref legend-block-ref)
 					  (cons ':save save-callout))
 				    (list (cons :vlr-modified 'am:table-modified)))))
 
 ;;;; Drawing
+
+(setq *legend-joints-color*
+      (vlax-create-object "AutoCAD.AcCmColor.20"))
+(vla-SetRGB *legend-joints-color* 248 215 49)
+
+(setq *legend-joints-transparency* 50)
+
+(defun am:line->points (line)
+  (am:pairs (am:variant->list (vla-get-Coordinates line))))
+
+(defun am:create-named-block (doc name)
+  (vla-Add (vla-get-Blocks doc)
+	   (vlax-3d-point 0 0 0)
+	   name))
 
 (defun am:create-block (doc
 			/ id-name id block-name block)
   (setq id-name "free-block-id"
 	id (am:default (am:get-variable (am:get-dictionary doc) id-name) 1)
 	block-name (strcat "Trench " (itoa id))
-	block (vla-Add (vla-get-Blocks doc)
-		       (vlax-3d-point 0 0 0)
-		       block-name))
+	block (am:create-named-block doc block-name))
   (am:set-variable (am:get-dictionary doc) id-name am:int16 (1+ id))
   block)
 
@@ -641,10 +669,10 @@
 
 (defun am:extrude-edge (edge direction m height-map shading-block block block-ref
 			/ edge-points extrusions extruded-points extrusion)
-  (setq edge-points (am:pairs (am:variant->list (vla-get-Coordinates edge)))
+  (setq edge-points (am:line->points edge)
 	closed (= :vlax-true (vla-get-Closed edge))
 	extrusions (if closed
-		       (am:plan-closed-extrusions edge-points)
+		       (am:plan-closed-extrusions edge-points direction)
 		       (am:plan-extrusions edge-points direction))
 	extruded-points (mapcar '(lambda (extrusion heights)
 				   (am:do-extrusion extrusion m heights block block-ref))
@@ -652,7 +680,7 @@
 				height-map))
   (if closed
       (setq extruded-points (append extruded-points (list (car extruded-points)))
-	    edge-points (append edge-points (list car edge-points))))
+	    edge-points (append edge-points (list (car edge-points)))))
   (am:connect-extruded extruded-points block block-ref)
   (setq segments (mapcar '(lambda (point next-point extruded next-extruded)
 			    (am:shade-slope point next-point extruded next-extruded shading-block))
@@ -677,6 +705,33 @@
 		     (vla-get-Blocks (vla-get-Document block))
 		     block-name)))
     (setq i (1- i))))
+
+(defun am:numerate-joints (model
+			   / fields main-line line-points block block-ref
+			   doc model-space
+			   legend-block-name legend-block legend-block-ref)
+  (setq fields (am:object-get model ':fields)
+	main-line (am:object-get fields ':main-line)
+	line-points (am:line->points main-line)
+	block (am:object-get fields ':block)
+	block-ref (am:object-get fields ':block-ref)
+	doc (vla-get-Document block)
+	model-space (vla-get-ModelSpace doc)
+	legend-block-name (strcat (vla-get-EffectiveName block-ref)
+				  "-"
+				  "legend")
+	legend-block (am:create-named-block doc
+					    legend-block-name))
+  (mapcar '(lambda (point number)
+	     (setq label (vla-AddText legend-block
+				       (itoa number)
+				       (vlax-3d-Point point)
+				       2))
+	     (vla-put-TrueColor label *legend-joints-color*)
+	     (vla-put-EntityTransparency label *legend-joints-transparency*))
+	  line-points
+	  (am:seq 1 (length line-points)))
+  legend-block)
 
 (defun am:trench-updated (model
 			  / acad-object doc
@@ -727,6 +782,7 @@
 		   am:load-trench
 		   am:trench-updated
 		   am:save-trench
+		   am:numerate-joints
 		   model-space))
 
 (defun am:trench (/ acad-object doc start end model-space
@@ -738,9 +794,9 @@
 	model-space (vla-get-ModelSpace doc)
 	block (am:create-block doc)
 	block-ref (vla-InsertBlock model-space
-                  (vlax-3d-point 0 0 0)
-                  (vla-get-Name block)
-                  1 1 1 0)
+				   (vlax-3d-point 0 0 0)
+				   (vla-get-Name block)
+				   1 1 1 0)
 	main-line (am:construct-main-line doc block block-ref)
 	trench-model (am:make-trench-model main-line block block-ref))
   (am:create-table "Trench parameters"
@@ -749,10 +805,10 @@
 		   am:load-trench
 		   am:trench-updated
 		   am:save-trench
+		   am:numerate-joints
 		   model-space))
 
 ;;;;
-;;add numbers to the main line vertices
 ;;allow save-loading
 ;;delete block on object removal
 ;;make the slope shading available as a separate command
