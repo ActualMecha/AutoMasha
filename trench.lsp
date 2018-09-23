@@ -198,6 +198,11 @@
   (am:set-object dictionary "trench-block" (am:object-get fields ':block))
   (am:set-object dictionary "trench-block-ref" (am:object-get fields ':block-ref)))
 
+(defun am:height-diff (heights)
+  (if heights
+      (- (am:object-get heights ':top)
+	 (am:object-get heights ':bottom))))
+
 (defun am:make-success (data)
   (cons ':success data))
 
@@ -585,46 +590,65 @@
   (vlax-safearray-fill array flat-list)
   (vla-AddLightweightPolyline block array))
 
-(defun am:plan-extrusion (prev-point point next-point direction
-			  / next-segment-v prev-segment-v extruded-vector
-			  full-angle half-angle)
+(defun am:extrude-point (point distance vector)
+  (mapcar '+ point
+	  (am:scalar-op '* distance (am:normalize vector))))
+
+(defun am:plan-extrusion (prev-point point next-point
+			  prev-distance distance next-distance 
+			  / prev-vector next-vector prev-begin
+			  prev-end next-begin next-end directed-distance)
   (setq next-segment-v (am:vector point next-point)
 	prev-segment-v (am:vector prev-point point))
-  (cond ((= prev-point nil) (setq extrude-vector (am:rotate90 next-segment-v)))
-	((= next-point nil) (setq extrude-vector (am:rotate90 prev-segment-v)))
+  (cond ((not prev-point) (am:extrude-point point distance (am:rotate90 next-segment-v)))
+	((not next-point) (am:extrude-point point distance (am:rotate90 prev-segment-v)))
 	(t (progn
-	     (setq full-angle (am:angle-between prev-segment-v
-						(am:scalar-op '* -1 next-segment-v))
-		   half-angle (/ full-angle 2)
-		   extrude-vector (am:rotate-vector prev-segment-v half-angle)))))
-  (list point (am:normalize (am:scalar-op '* direction extrude-vector))))
+	     (setq prev-begin (am:extrude-point prev-point
+						prev-distance
+						(am:rotate90 prev-segment-v))
+		   prev-end (am:extrude-point point
+					      distance
+					      (am:rotate90 prev-segment-v))
+		   next-begin (am:extrude-point point
+						distance
+						(am:rotate90 next-segment-v))
+		   next-end (am:extrude-point next-point
+					      next-distance
+					      (am:rotate90 next-segment-v)))
+	     (inters prev-begin prev-end next-begin next-end nil)))))
 
-(defun am:plan-closed-extrusions (edge direction)
-  (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
+
+(defun am:plan-extrusions (prev-point point next-point
+			   prev-heights heights next-heights direction)
+  (am:plan-extrusion prev-point
+		     point
+		     next-point
+		     (if prev-heights
+			 (* direction (am:height-diff prev-heights)))
+		     (if heights
+			 (* direction (am:height-diff heights)))
+		     (if next-heights
+			 (* direction (am:height-diff next-heights)))))
+
+(defun am:plan-closed-extrusions (edge height-map direction)
+  (mapcar 'am:plan-extrusions
 	  (cons (last edge) edge)
 	  edge
-	  (append (cdr edge) (list (car edge)))))
+	  (append (cdr edge) (list (car edge)))
+	  (cons (last height-map) height-map)
+	  height-map
+	  (append (cdr height-map) (list (car height-map)))
+	  (mapcar '(lambda (_) direction) edge)))
 
-(defun am:plan-extrusions (edge direction)
-  (mapcar '(lambda (a b c) (am:plan-extrusion a b c direction))
-	  (append (list nil) edge)
+(defun am:plan-opened-extrusions (edge height-map direction)
+  (mapcar 'am:plan-extrusions
+	  (cons 'nil edge)
 	  edge
-	  (append (cdr edge) (list nil))))
-
-(defun am:do-extrusion (extrusion m heights block block-ref
-			/ point direction dist upper-point)
-  (setq point (car extrusion)
-	direction (cadr extrusion)
-	dist (* m (- (am:object-get heights ':top)
-		     (am:object-get heights ':bottom)))
-	upper-point (mapcar '+
-			    point
-			    (mapcar '(lambda (x) (* dist x))
-				    direction)))
-  (vla-AddLine block
-    (vlax-3d-point (append point '(0)))
-    (vlax-3d-point upper-point))
-  upper-point)
+	  (append (cdr edge) '(nil))
+	  (cons 'nil height-map)
+	  height-map
+	  (append (cdr height-map) '(nil))
+	  (mapcar '(lambda (_) direction) edge)))
 
 (defun am:shade-slope (bottom next-bottom top next-top block
 		       / step top-vector top-unit-vector top-length
@@ -668,26 +692,28 @@
 	  (am:seq 1 (1+ count))))
 
 (defun am:extrude-edge (edge direction m height-map shading-block block block-ref
-			/ edge-points extrusions extruded-points extrusion)
+			/ edge-points extruded-points extrusion projected-direction)
   (setq edge-points (am:line->points edge)
 	closed (= :vlax-true (vla-get-Closed edge))
-	extrusions (if closed
-		       (am:plan-closed-extrusions edge-points direction)
-		       (am:plan-extrusions edge-points direction))
-	extruded-points (mapcar '(lambda (extrusion heights)
-				   (am:do-extrusion extrusion m heights block block-ref))
-				extrusions
-				height-map))
-  (if closed
-      (setq extruded-points (append extruded-points (list (car extruded-points)))
-	    edge-points (append edge-points (list (car edge-points)))))
+	projected-direction (* m direction)
+	extruded-points (if closed
+			    (am:plan-closed-extrusions edge-points height-map projected-direction)
+			    (am:plan-opened-extrusions edge-points height-map projected-direction)))
+  (if closed (setq extruded-points (append extruded-points
+					   (list (car extruded-points)))
+		   edge-points (append edge-points
+				       (list (car edge-points)))))
   (am:connect-extruded extruded-points block block-ref)
-  (setq segments (mapcar '(lambda (point next-point extruded next-extruded)
-			    (am:shade-slope point next-point extruded next-extruded shading-block))
-			 edge-points
-			 (cdr edge-points)
-			 extruded-points
-			 (cdr extruded-points)))
+  (mapcar '(lambda (bottom top)
+	     (vla-AddLine block (vlax-3d-point bottom) (vlax-3d-point top)))
+	  edge-points
+	  extruded-points)
+  (mapcar '(lambda (point next-point extruded next-extruded)
+	     (am:shade-slope point next-point extruded next-extruded shading-block))
+	  edge-points
+	  (cdr edge-points)
+	  extruded-points
+	  (cdr extruded-points))
   extruded-points)
 
 (defun am:clear-trench (main-line block block-ref
