@@ -545,9 +545,10 @@
 
 (defun am:append-tail (polyline first-position last-position len block-ref
 		       / next-position point)
-  (initget 1 "Stop Close")
+  (initget 0 "Stop Close")
   (setq input (getpoint last-position "Next segment or [Stop/Close]")
 	next-position (cond ((equal input "Stop") ())
+			    ((equal input nil) ())
 			    ((equal input "Close") first-position)
 			    (t (am:flatten-point input))))
   (cond ((equal next-position first-position)
