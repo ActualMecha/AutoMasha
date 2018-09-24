@@ -482,7 +482,7 @@
 			save-callout draw-legend-block parent 
 			/ doc point table properties wrapper block
 			legend-block legend-block-name legend-block-ref)
-  (setq point (getpoint "Table position")
+  (setq point (getpoint "Table position\n")
 	properties (am:object-get model ':properties)
 	table (vla-AddTable parent
 			    (vlax-3d-point point)
@@ -546,7 +546,7 @@
 (defun am:append-tail (polyline first-position last-position len block-ref
 		       / next-position point)
   (initget 0 "Stop Close")
-  (setq input (getpoint last-position "Next segment or [Stop/Close]")
+  (setq input (getpoint last-position "Next segment or [Stop/Close]\n")
 	next-position (cond ((equal input "Stop") ())
 			    ((equal input nil) ())
 			    ((equal input "Close") first-position)
@@ -567,8 +567,8 @@
 
 (defun am:construct-main-line (doc block block-ref
 			       / start first points polyline)
-  (setq start (am:flatten-point (getpoint "Trench start"))
-	first (am:flatten-point (getpoint start "First segment"))
+  (setq start (am:flatten-point (getpoint "Trench start\n"))
+	first (am:flatten-point (getpoint start "First segment\n"))
 	points (vlax-make-safearray vlax-vbDouble '(0 . 3)))
   (vlax-safearray-fill points (append start first))
   (setq polyline (vla-AddLightweightPolyline block points))
@@ -800,7 +800,7 @@
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 	model-space (vla-get-ModelSpace doc)
-	block-ref (vlax-ename->vla-object (car (entsel "Trench block")))
+	block-ref (vlax-ename->vla-object (car (entsel "Trench block\n")))
 	dictionary (vla-GetExtensionDictionary block-ref)
 	model (am:load-trench dictionary))
   (am:create-table "Trench parameters"
