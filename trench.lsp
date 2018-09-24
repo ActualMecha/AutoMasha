@@ -795,7 +795,7 @@
 
   (vla-Update block-ref))
 
-(defun am:edit-trench (/ acad-object doc model-space
+(defun c:edit-trench (/ acad-object doc model-space
 			 model block-ref dictionary)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
@@ -812,7 +812,7 @@
 		   am:numerate-joints
 		   model-space))
 
-(defun am:trench (/ acad-object doc start end model-space
+(defun c:trench (/ acad-object doc start end model-space
 		  block block-ref start main-line trench-model	
 		  bottom-edges right-slope-bottom left-slope-bottom
 		  right-slope-top left-slope-top)
