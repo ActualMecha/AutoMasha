@@ -1,6 +1,7 @@
 (vl-load-com)
 ;;;; constants and utils
 
+(setq am:boolean 290)
 (setq am:pointer 320)
 (setq am:float 1040)
 (setq am:distance 1041)
@@ -130,7 +131,7 @@
 	(cons ':properties properties)
 	(cons ':fields fields)))
 
-(defun am:make-trench-model (main-line block block-ref)
+(defun am:make-trench-model (main-line)
   (am:make-model ':trench
 		 (append
 		  (list (am:make-property ':width "Width" 1.0)
@@ -144,9 +145,7 @@
 				    (list (cons ':bottom 0.0)
 					  (cons ':top 3.0)))
 				 (am:pairs (am:variant->list (vla-get-Coordinates main-line)))))))
-		 (list (cons ':main-line main-line)
-		       (cons ':block block)
-		       (cons ':block-ref block-ref))))
+		 (list (cons ':main-line main-line))))
 
 (defun am:load-trench-height-map (dictionary)
   (mapcar '(lambda (index)
@@ -166,9 +165,7 @@
 						   (list (am:make-column ':bottom "Bottom")
 							 (am:make-column ':top "Top"))
 						   (am:load-trench-height-map dictionary)))
-		 (list (cons ':main-line (am:get-object dictionary "trench-main-line"))
-		       (cons ':block (am:get-object dictionary "trench-block"))
-		       (cons ':block-ref (am:get-object dictionary "trench-block-ref")))))
+		 (list (cons ':main-line (am:get-object dictionary "trench-main-line")))))
 
 (defun am:save-trench-height-map (dictionary height-map)
   (am:set-variable dictionary "trench-heights-length"
@@ -194,9 +191,7 @@
   (am:set-variable dictionary "trench-m"
 		   am:float (am:property-get properties ':m))
   (am:save-trench-height-map dictionary (am:property-get properties ':height-map))
-  (am:set-object dictionary "trench-main-line" (am:object-get fields ':main-line))
-  (am:set-object dictionary "trench-block" (am:object-get fields ':block))
-  (am:set-object dictionary "trench-block-ref" (am:object-get fields ':block-ref)))
+  (am:set-object dictionary "trench-main-line" (am:object-get fields ':main-line)))
 
 (defun am:height-diff (heights)
   (if heights
@@ -489,18 +484,18 @@
 			    (am:calculate-table-rows properties)
 			    (am:calculate-table-columns properties)
 			    1
-			    5)
-	legend-block (draw-legend-block model)
-	legend-block-name (vla-get-Name legend-block)
-	legend-block-ref (vla-InsertBlock model-space
-					  (vlax-3d-point 0 0 0)
-					  legend-block-name
-					  1 1 1 0))
+			    5))
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
   (modified-callout model)
   (save-callout model dictionary)
-  (setq reactor (vlr-object-reactor (list table)
+  (setq legend-block (draw-legend-block model)	
+	legend-block-name (vla-get-Name legend-block)
+	legend-block-ref (vla-InsertBlock model-space
+					  (vlax-3d-point 0 0 0)
+					  legend-block-name
+					  1 1 1 0)
+	reactor (vlr-object-reactor (list table)
 				    (list (cons ':dictionary dictionary)
 					  (cons ':load load-callout)
 					  (cons ':modified modified-callout)
@@ -543,7 +538,7 @@
 	   (vlax-3d-point 0 0 0)
 	   child-name))
 
-(defun am:append-tail (polyline first-position last-position len block-ref
+(defun am:append-tail (polyline first-position last-position len parent 
 		       / next-position point)
   (initget 0 "Stop Close")
   (setq input (getpoint last-position "Next segment or [Stop/Close]\n")
@@ -552,44 +547,39 @@
 			    ((equal input "Close") first-position)
 			    (t (am:flatten-point input))))
   (cond ((equal next-position first-position)
-	 (vla-put-Closed polyline :vlax-true)
-	 (vla-Update block-ref))
+	 (vla-put-Closed polyline :vlax-true))
 	(next-position
 	 (setq point (vlax-make-safearray vlax-vbDouble '(0 . 1)))
 	 (vlax-safearray-fill point next-position)
 	 (vla-AddVertex polyline len point)
-	 (vla-Update block-ref)
 	 (am:append-tail polyline
 			 first-position
 			 next-position
 			 (1+ len)
-			 block-ref))))
+			 parent))))
 
-(defun am:construct-main-line (doc block block-ref
-			       / start first points polyline)
+(defun am:construct-main-line (doc
+			       / model-space start first points polyline)
   (setq start (am:flatten-point (getpoint "Trench start\n"))
 	first (am:flatten-point (getpoint start "First segment\n"))
-	points (vlax-make-safearray vlax-vbDouble '(0 . 3)))
+	points (vlax-make-safearray vlax-vbDouble '(0 . 3))
+	model-space (vla-get-ModelSpace doc))
   (vlax-safearray-fill points (append start first))
-  (setq polyline (vla-AddLightweightPolyline block points))
-  (vla-Update block-ref)
-  (am:append-tail polyline start first 2 block-ref)
+  (setq polyline (vla-AddLightweightPolyline model-space points))
+  (am:append-tail polyline start first 2 model-space)
   polyline)
 
-(defun am:add-width (main-line width block-ref
-		     / offset offset+ offset-)
-  (setq offset (/ width 2)
-	offset+ (vlax-variant-value (vla-Offset main-line offset))
-	offset- (vlax-variant-value (vla-Offset main-line (- offset))))
-  (list (vlax-safearray-get-element offset+ 0)
-	(vlax-safearray-get-element offset- 0)))
-
-(defun am:connect-extruded (points block block-ref
-			    / array flat-list)
-  (setq array (vlax-make-safearray vlax-vbDouble (cons 0 (1- (* 2 (length points)))))
-	flat-list (am:flatten-list (mapcar 'am:flatten-point points)))
+(defun am:connect-extruded (points block closed
+			    / useful-points array flat-list polyline)
+  (setq useful-points (if closed
+			  (reverse (cdr (reverse points)))
+			  points)
+	array (vlax-make-safearray vlax-vbDouble (cons 0 (1- (* 2 (length useful-points)))))
+	flat-list (am:flatten-list (mapcar 'am:flatten-point useful-points)))
   (vlax-safearray-fill array flat-list)
-  (vla-AddLightweightPolyline block array))
+  (setq polyline (vla-AddLightweightPolyline block array))
+  (vla-put-Closed polyline (if closed :vlax-true :vlax-false))
+  polyline)
 
 (defun am:extrude-point (point distance vector)
   (mapcar '+ point
@@ -619,37 +609,39 @@
 	     (inters prev-begin prev-end next-begin next-end nil)))))
 
 
-(defun am:plan-extrusions (prev-point point next-point
-			   prev-heights heights next-heights direction)
-  (am:plan-extrusion prev-point
-		     point
-		     next-point
-		     (if prev-heights
-			 (* direction (am:height-diff prev-heights)))
-		     (if heights
-			 (* direction (am:height-diff heights)))
-		     (if next-heights
-			 (* direction (am:height-diff next-heights)))))
-
-(defun am:plan-closed-extrusions (edge height-map direction)
-  (mapcar 'am:plan-extrusions
+(defun am:plan-closed-extrusions (edge lengths)
+  (mapcar 'am:plan-extrusion
 	  (cons (last edge) edge)
 	  edge
 	  (append (cdr edge) (list (car edge)))
-	  (cons (last height-map) height-map)
-	  height-map
-	  (append (cdr height-map) (list (car height-map)))
-	  (mapcar '(lambda (_) direction) edge)))
+	  (cons (last lengths) lengths)
+	  lengths
+	  (append (cdr lengths) (list (car lengths)))))
 
-(defun am:plan-opened-extrusions (edge height-map direction)
-  (mapcar 'am:plan-extrusions
+(defun am:plan-opened-extrusions (edge lengths)
+  (mapcar 'am:plan-extrusion
 	  (cons 'nil edge)
 	  edge
 	  (append (cdr edge) '(nil))
-	  (cons 'nil height-map)
-	  height-map
-	  (append (cdr height-map) '(nil))
-	  (mapcar '(lambda (_) direction) edge)))
+	  (cons 'nil lengths)
+	  lengths
+	  (append (cdr lengths) '(nil))))
+
+(defun am:offset (line lengths block
+		  / line-points length-map closed extruded-points edge-points)
+  (setq line-points (am:line->points line)
+	length-map (if (numberp lengths)
+		       (mapcar '(lambda (_) lengths) line-points)
+		       lengths)
+
+	closed (= :vlax-true (vla-get-Closed line))
+	extruded-points (if closed
+			    (am:plan-closed-extrusions line-points length-map)
+			    (am:plan-opened-extrusions line-points length-map)))
+
+  (if closed (setq extruded-points (append extruded-points (list (car extruded-points)))))
+
+  (am:connect-extruded extruded-points block closed))
 
 (defun am:shade-slope (bottom next-bottom top next-top block
 		       / step top-vector top-unit-vector top-length
@@ -692,61 +684,74 @@
 			  (vlax-3d-point shade-end)))
 	  (am:seq 1 (1+ count))))
 
-(defun am:extrude-edge (edge direction m height-map shading-block block block-ref
-			/ edge-points extruded-points extrusion projected-direction)
-  (setq edge-points (am:line->points edge)
-	closed (= :vlax-true (vla-get-Closed edge))
+(defun am:add-width (main-line width block
+		     / offset)
+  (setq offset (/ width 2))
+  (list (am:offset main-line (- offset) block)
+	(am:offset main-line offset block)))
+
+
+(defun am:extrude-edge (edge direction m height-map shading-block block
+			/ closed edge-points projected-direction height-diffs extruded-line extruded-points)
+  (setq closed (= (vla-get-Closed edge) :vlax-true)
+	edge-points (am:line->points edge)
 	projected-direction (* m direction)
-	extruded-points (if closed
-			    (am:plan-closed-extrusions edge-points height-map projected-direction)
-			    (am:plan-opened-extrusions edge-points height-map projected-direction)))
-  (if closed (setq extruded-points (append extruded-points
-					   (list (car extruded-points)))
-		   edge-points (append edge-points
-				       (list (car edge-points)))))
-  (am:connect-extruded extruded-points block block-ref)
+	height-diffs (mapcar 'am:height-diff height-map)
+	extruded-line (am:offset edge (am:scalar-op '* projected-direction height-diffs) block)
+	extruded-points (am:line->points extruded-line))
+
+  (if closed (setq extruded-points (append extruded-points (list (car extruded-points)))
+		   edge-points (append edge-points (list (car edge-points)))))
+
   (mapcar '(lambda (bottom top)
 	     (vla-AddLine block (vlax-3d-point bottom) (vlax-3d-point top)))
 	  edge-points
 	  extruded-points)
+  
   (mapcar '(lambda (point next-point extruded next-extruded)
 	     (am:shade-slope point next-point extruded next-extruded shading-block))
 	  edge-points
 	  (cdr edge-points)
 	  extruded-points
 	  (cdr extruded-points))
+  
   extruded-points)
 
 (defun am:clear-trench (main-line block block-ref
-			/ i id item block-name)
-  (setq i (1- (vla-get-Count block))
-	id (vla-get-ObjectId main-line))
-  (while (>= i 0)
-    (setq item (vla-Item block i)
-	  block-name (if (= "AcDbBlockReference" (vla-get-ObjectName item))
-			 (vla-get-EffectiveName item)))
-    (if (/= (vla-get-ObjectId item) id)
-	(vla-Delete item))
-    (if block-name
-	(vla-Delete (vla-Item
-		     (vla-get-Blocks (vla-get-Document block))
-		     block-name)))
-    (setq i (1- i))))
+			/ i item block-name)
+  (if (and block
+	   block-ref
+	   (not (vlax-erased-p block))
+	   (not (vlax-erased-p block-ref)))
+      (progn
+	(setq i (1- (vla-get-Count block)))
+	(while (>= i 0)
+	  (setq item (vla-Item block i)
+		block-name (if (= "AcDbBlockReference" (vla-get-ObjectName item))
+			       (vla-get-EffectiveName item)))
+	  (if (/= (vla-get-ObjectId item) id)
+	      (vla-Delete item))
+	  (if block-name
+	      (vla-Delete (vla-Item
+			   (vla-get-Blocks (vla-get-Document block))
+			   block-name)))
+	  (setq i (1- i)))
+	(vla-Delete block-ref)
+	(vla-Delete block))))
 
 (defun am:numerate-joints (model
-			   / fields main-line line-points block block-ref
-			   doc model-space
+			   / fields main-line line-points block
+			   doc model-space dictionary
 			   legend-block-name legend-block legend-block-ref)
   (setq fields (am:object-get model ':fields)
 	main-line (am:object-get fields ':main-line)
+	dictionary (vla-GetExtensionDictionary main-line)
 	line-points (am:line->points main-line)
-	block (am:object-get fields ':block)
-	block-ref (am:object-get fields ':block-ref)
-	doc (vla-get-Document block)
+	block (am:get-object dictionary "block")
+	doc (vla-get-Document main-line)
 	model-space (vla-get-ModelSpace doc)
-	legend-block-name (strcat (vla-get-EffectiveName block-ref)
-				  "-"
-				  "legend")
+	legend-block-name (strcat (vla-get-Name block)
+				  "-legend")
 	legend-block (am:create-named-block doc
 					    legend-block-name))
   (mapcar '(lambda (point number)
@@ -761,18 +766,22 @@
   legend-block)
 
 (defun am:trench-updated (model
-			  / acad-object doc
+			  / acad-object doc model-space
 			  fields main-line block block-ref
 			  properties width m height-map
 			  bottom-edges bottom-edge-right bottom-edge-left
-			  top-edge-right top-edge-left)
+			  top-edge-right top-edge-left
+			  main-line-dictionary block-dictionary)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
+	model-space (vla-get-ModelSpace doc)
 
 	fields (am:object-get model ':fields)
 	main-line (am:object-get fields ':main-line)
-	block (am:object-get fields ':block)
-	block-ref (am:object-get fields ':block-ref)
+	
+	main-line-dictionary (vla-getExtensionDictionary main-line)
+	block (am:get-object main-line-dictionary "block")
+	block-ref (am:get-object main-line-dictionary "block-ref")
 
 	properties (am:object-get model ':properties)
 	width (am:property-get properties ':width)
@@ -781,28 +790,42 @@
 
   (am:clear-trench main-line block block-ref)
 
-  (setq bottom-edges (am:add-width main-line width block-ref)
+  (setq block (am:create-block doc)
+	bottom-edges (am:add-width main-line width block)
 	bottom-edge-right (car bottom-edges)
 	bottom-edge-left (cadr bottom-edges)
 	shading-block (am:create-subblock block "shading")
-        top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map shading-block block block-ref)
-	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map shading-block block block-ref))
+        top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map shading-block block)
+	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map shading-block block))
 
   (vla-InsertBlock block
-                  (vlax-3d-point 0 0 0)
-                  (vla-get-Name shading-block)
-                  1 1 1 0)
+                   (vlax-3d-point 0 0 0)
+                   (vla-get-Name shading-block)
+                   1 1 1 0)
 
-  (vla-Update block-ref))
+  (setq block-ref (vla-InsertBlock model-space
+				   (vlax-3d-point 0 0 0)
+				   (vla-get-Name block)
+				   1 1 1 0)
+	block-dictionary (vla-getExtensionDictionary block-ref))
 
-(defun c:edit-trench (/ acad-object doc model-space
-			 model block-ref dictionary)
-  (setq acad-object (vlax-get-acad-object)
-	doc (vla-get-ActiveDocument acad-object)
-	model-space (vla-get-ModelSpace doc)
-	block-ref (vlax-ename->vla-object (car (entsel "Trench block\n")))
-	dictionary (vla-GetExtensionDictionary block-ref)
-	model (am:load-trench dictionary))
+  (am:set-object main-line-dictionary "block" block)
+  (am:set-object main-line-dictionary "block-ref" block-ref)
+  (am:set-variable main-line-dictionary "is-trench-main-line" am:boolean :vlax-true)
+  (am:set-object block-dictionary "main-line" main-line)
+  (am:set-variable block-dictionary "is-trench-block" am:boolean :vlax-true))
+
+(defun am:select-trench-main-line (/ selected selected-dictionary)
+  (setq selected (vlax-ename->vla-object (car (entsel "Select a trench\n")))
+	selected-dictionary (vla-getExtensionDictionary selected))
+  (cond ((am:get-variable selected-dictionary "is-trench-main-line") selected)
+	((am:get-variable selected-dictionary "is-trench-block")
+	 (am:get-object selected-dictionary "main-line"))))
+
+(defun am:restore-table (main-line model-space
+			 / dictionary model)
+  (setq dictionary (vla-GetExtensionDictionary main-line)
+	model (am:load-trench dictionary)) 
   (am:create-table "Trench parameters"
 		   model
 		   dictionary
@@ -812,23 +835,30 @@
 		   am:numerate-joints
 		   model-space))
 
-(defun c:trench (/ acad-object doc start end model-space
-		  block block-ref start main-line trench-model	
-		  bottom-edges right-slope-bottom left-slope-bottom
-		  right-slope-top left-slope-top)
+
+(defun c:edit-trench (/ acad-object doc model-space selected-trench
+			model block-ref dictionary)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 	model-space (vla-get-ModelSpace doc)
-	block (am:create-block doc)
-	block-ref (vla-InsertBlock model-space
-				   (vlax-3d-point 0 0 0)
-				   (vla-get-Name block)
-				   1 1 1 0)
-	main-line (am:construct-main-line doc block block-ref)
-	trench-model (am:make-trench-model main-line block block-ref))
+	main-line (am:select-trench-main-line))
+
+  (if main-line
+      (am:restore-table main-line model-space)
+      (alert "This is not a trench")))
+
+(defun c:trench (/ acad-object doc start end model-space
+		   start main-line trench-model	
+		   bottom-edges right-slope-bottom left-slope-bottom
+		   right-slope-top left-slope-top)
+  (setq acad-object (vlax-get-acad-object)
+	doc (vla-get-ActiveDocument acad-object)
+	model-space (vla-get-ModelSpace doc)
+	main-line (am:construct-main-line doc)
+	trench-model (am:make-trench-model main-line))
   (am:create-table "Trench parameters"
 		   trench-model
-		   (vla-GetExtensionDictionary block-ref)
+		   (vla-GetExtensionDictionary main-line)
 		   am:load-trench
 		   am:trench-updated
 		   am:save-trench
@@ -842,3 +872,4 @@
 ;;move user input from table to the ribbon
 ;;input validation
 ;;optionally add slopes on trench's ends
+;;make the main-line be separate from the block and allow it's edit
