@@ -81,9 +81,11 @@
       (vla-Remove dictionary name)))
 
 (defun am:set-object (dictionary name object)
-  (am:set-variable dictionary
-		   name 
-		   am:pointer (vla-get-Handle object)))
+  (if object
+      (am:set-variable dictionary
+		       name 
+		       am:pointer (vla-get-Handle object))
+      (vla-Remove dictionary name)))
 
 ;;;; Model
 
@@ -380,12 +382,8 @@
 
 (defun am:table-erased (reactor-object)
   (setq reactor-data (vlr-data reactor-object)
-	legend-block (am:object-get reactor-data ':legend-block)
-	legend-block-ref (am:object-get reactor-data ':legend-block-ref))
-  (if (not (vlax-erased-p legend-block-ref))
-      (vla-Delete legend-block-ref))
-  (if (not (vlax-erased-p legend-block))
-      (vla-Delete legend-block)))
+	delete-legend-callout (am:object-get reactor-data ':delete-legend))
+ (delete-legend-callout (am:object-get reactor-data ':dictionary)))
 
 (defun am:table-modified (owner reactor-object extra)
   (if (vlax-erased-p owner)
@@ -473,8 +471,10 @@
 			     (am:object-get property ':column-count)))
 		      properties))))
 
-(defun am:create-table (title model dictionary load-callout modified-callout
-			save-callout draw-legend-block parent 
+(defun am:create-table (title model dictionary
+			load-callout modified-callout save-callout
+			draw-legend-block delete-legend-block
+			parent
 			/ doc point table properties wrapper block
 			legend-block legend-block-name legend-block-ref)
   (setq point (getpoint "Table position\n")
@@ -487,21 +487,15 @@
 			    5))
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
-  (modified-callout model)
   (save-callout model dictionary)
-  (setq legend-block (draw-legend-block model)	
-	legend-block-name (vla-get-Name legend-block)
-	legend-block-ref (vla-InsertBlock model-space
-					  (vlax-3d-point 0 0 0)
-					  legend-block-name
-					  1 1 1 0)
-	reactor (vlr-object-reactor (list table)
+  (modified-callout model)
+  (draw-legend-block model)
+  (setq reactor (vlr-object-reactor (list table)
 				    (list (cons ':dictionary dictionary)
 					  (cons ':load load-callout)
 					  (cons ':modified modified-callout)
-					  (cons ':legend-block legend-block)
-					  (cons ':legend-block-ref legend-block-ref)
-					  (cons ':save save-callout))
+					  (cons ':save save-callout)
+					  (cons ':delete-legend delete-legend-block))
 				    (list (cons :vlr-modified 'am:table-modified)))))
 
 ;;;; Drawing
@@ -717,7 +711,7 @@
   
   extruded-points)
 
-(defun am:clear-trench (main-line block block-ref
+(defun am:clear-trench (block block-ref
 			/ i item block-name)
   (if (and block
 	   block-ref
@@ -739,21 +733,31 @@
 	(vla-Delete block-ref)
 	(vla-Delete block))))
 
-(defun am:numerate-joints (model
-			   / fields main-line line-points block
-			   doc model-space dictionary
-			   legend-block-name legend-block legend-block-ref)
-  (setq fields (am:object-get model ':fields)
+(defun am:delete-legend (dictionary)
+  (setq legend-block (am:get-object dictionary "legend-block")
+	legend-block-ref (am:get-object dictionary "legend-block-ref"))
+  (am:clear-trench legend-block legend-block-ref)
+  (am:set-object dictionary "legend-block" nil)
+  (am:set-object dictionary "legend-block-ref" nil))
+
+(defun am:redraw-legend (dictionary
+			 / model fields main-line line-points block	
+			 doc model-space dictionary legend-block legend-block-ref
+			 legend-block-name legend-block legend-block-ref)
+
+  (setq model (am:load-trench dictionary)
+	fields (am:object-get model ':fields)
 	main-line (am:object-get fields ':main-line)
-	dictionary (vla-GetExtensionDictionary main-line)
 	line-points (am:line->points main-line)
 	block (am:get-object dictionary "block")
 	doc (vla-get-Document main-line)
-	model-space (vla-get-ModelSpace doc)
-	legend-block-name (strcat (vla-get-Name block)
-				  "-legend")
-	legend-block (am:create-named-block doc
-					    legend-block-name))
+	model-space (vla-get-ModelSpace doc))
+
+  (am:delete-legend dictionary)
+  
+
+  (setq legend-block-name (strcat (vla-get-Name block) "-legend")
+	legend-block (am:create-named-block doc legend-block-name)) 
   (mapcar '(lambda (point number)
 	     (setq label (vla-AddText legend-block
 				       (itoa number)
@@ -762,24 +766,36 @@
 	     (vla-put-TrueColor label *legend-joints-color*)
 	     (vla-put-EntityTransparency label *legend-joints-transparency*))
 	  line-points
-	  (am:seq 1 (length line-points)))
-  legend-block)
+	  (am:seq 1 (length line-points))) 
+  (setq legend-block-ref (vla-InsertBlock model-space
+					  (vlax-3d-point 0 0 0)
+					  legend-block-name
+					  1 1 1 0))
+  (am:set-object dictionary "legend-block" legend-block)
+  (am:set-object dictionary "legend-block-ref" legend-block-ref)
+  nil)
 
-(defun am:trench-updated (model
-			  / acad-object doc model-space
-			  fields main-line block block-ref
-			  properties width m height-map
-			  bottom-edges bottom-edge-right bottom-edge-left
-			  top-edge-right top-edge-left
-			  main-line-dictionary block-dictionary)
+(defun am:numerate-joints (model
+			   / fields main-line main-line-dictionary)
+  (setq fields (am:object-get model ':fields)
+	main-line (am:object-get fields ':main-line)
+	main-line-dictionary (vla-getExtensionDictionary main-line))
+  (am:redraw-legend main-line-dictionary))
+
+(defun am:redraw-trench (main-line-dictionary
+			 / acad-object doc model-space
+			 model fields main-line block block-ref
+			 properties width m height-map
+			 bottom-edges bottom-edge-right bottom-edge-left
+			 top-edge-right top-edge-left)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 	model-space (vla-get-ModelSpace doc)
 
+	model (am:load-trench main-line-dictionary)
 	fields (am:object-get model ':fields)
 	main-line (am:object-get fields ':main-line)
 	
-	main-line-dictionary (vla-getExtensionDictionary main-line)
 	block (am:get-object main-line-dictionary "block")
 	block-ref (am:get-object main-line-dictionary "block-ref")
 
@@ -788,8 +804,8 @@
 	m (am:property-get properties ':m)
 	height-map (am:property-get properties ':height-map))
 
-  (am:clear-trench main-line block block-ref)
-
+  (am:clear-trench block block-ref)
+  
   (setq block (am:create-block doc)
 	bottom-edges (am:add-width main-line width block)
 	bottom-edge-right (car bottom-edges)
@@ -797,23 +813,27 @@
 	shading-block (am:create-subblock block "shading")
         top-edge-right (am:extrude-edge bottom-edge-right -1 m height-map shading-block block)
 	top-edge-left (am:extrude-edge bottom-edge-left 1 m height-map shading-block block))
-
   (vla-InsertBlock block
                    (vlax-3d-point 0 0 0)
                    (vla-get-Name shading-block)
                    1 1 1 0)
-
   (setq block-ref (vla-InsertBlock model-space
 				   (vlax-3d-point 0 0 0)
 				   (vla-get-Name block)
 				   1 1 1 0)
 	block-dictionary (vla-getExtensionDictionary block-ref))
-
-  (am:set-object main-line-dictionary "block" block)
-  (am:set-object main-line-dictionary "block-ref" block-ref)
+  (am:set-object main-line-dictionary "block" block) 
+  (am:set-object main-line-dictionary "block-ref" block-ref) 
   (am:set-variable main-line-dictionary "is-trench-main-line" am:boolean :vlax-true)
   (am:set-object block-dictionary "main-line" main-line)
-  (am:set-variable block-dictionary "is-trench-block" am:boolean :vlax-true))
+  (am:set-variable block-dictionary "is-trench-block" am:boolean :vlax-true) )
+
+(defun am:trench-updated (model
+			  / fields main-line main-line-dictionary)
+  (setq fields (am:object-get model ':fields)
+	main-line (am:object-get fields ':main-line)
+	main-line-dictionary (vla-getExtensionDictionary main-line))
+  (am:redraw-trench main-line-dictionary))
 
 (defun am:select-trench-main-line (/ selected selected-dictionary)
   (setq selected (vlax-ename->vla-object (car (entsel "Select a trench\n")))
@@ -833,8 +853,15 @@
 		   am:trench-updated
 		   am:save-trench
 		   am:numerate-joints
+		   am:delete-legend
 		   model-space))
 
+(defun am:main-line-modified (owner reactor-object extra
+			      / main-line main-line-dictionary)
+  (setq main-line-dictionary (vlr-data reactor-object))
+  (am:redraw-trench main-line-dictionary)
+  (if (am:get-object main-line-dictionary "legend-block-ref")
+      (am:redraw-legend main-line-dictionary)))
 
 (defun c:edit-trench (/ acad-object doc model-space selected-trench
 			model block-ref dictionary)
@@ -856,6 +883,7 @@
 	model-space (vla-get-ModelSpace doc)
 	main-line (am:construct-main-line doc)
 	trench-model (am:make-trench-model main-line))
+
   (am:create-table "Trench parameters"
 		   trench-model
 		   (vla-GetExtensionDictionary main-line)
@@ -863,7 +891,12 @@
 		   am:trench-updated
 		   am:save-trench
 		   am:numerate-joints
-		   model-space))
+		   am:delete-legend
+		   model-space)
+
+  (vlr-object-reactor (list main-line)
+		      (vla-GetExtensionDictionary main-line)
+		      (list (cons :vlr-modified 'am:main-line-modified))))
 
 ;;;;
 ;;allow save-loading
