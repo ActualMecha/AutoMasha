@@ -380,10 +380,13 @@
 	(callout new-model)
 	(save-callout new-model dictionary))))
 
-(defun am:table-erased (reactor-object)
+(defun am:table-erased (reactor-object
+			/ reactor-data delete-legend-callout dictionary)
   (setq reactor-data (vlr-data reactor-object)
+	dictionary (am:object-get reactor-data ':dictionary)
 	delete-legend-callout (am:object-get reactor-data ':delete-legend))
- (delete-legend-callout (am:object-get reactor-data ':dictionary)))
+  (am:set-object dictionary "table" nil)
+  (delete-legend-callout (am:object-get reactor-data ':dictionary)))
 
 (defun am:table-modified (owner reactor-object extra)
   (if (vlax-erased-p owner)
@@ -475,8 +478,12 @@
 			load-callout modified-callout save-callout
 			draw-legend-block delete-legend-block
 			parent
-			/ doc point table properties wrapper block
+			/ doc point table properties wrapper block existing-table
 			legend-block legend-block-name legend-block-ref)
+  (setq existing-table (am:get-object dictionary "table"))
+  (if (and existing-table
+	   (not (vlax-erased-p existing-table)))
+      (vla-Delete existing-table))
   (setq point (getpoint "Table position\n")
 	properties (am:object-get model ':properties)
 	table (vla-AddTable parent
@@ -485,6 +492,7 @@
 			    (am:calculate-table-columns properties)
 			    1
 			    5))
+  (am:set-object dictionary "table" table)
   (vla-SetText table 0 0 title)
   (am:fill-table table properties 1)
   (save-callout model dictionary)
@@ -856,12 +864,25 @@
 		   am:delete-legend
 		   model-space))
 
+(defun am:main-line-changed (owner reactor-object extra)
+ (setq main-line-dictionary (vlr-data reactor-object)) 
+ (am:redraw-trench main-line-dictionary) 
+ (if (am:get-object main-line-dictionary "legend-block-ref")
+     (am:redraw-legend main-line-dictionary)))
+
+(defun am:main-line-deleted (owner reactor-object extra
+			     / main-line-dictionary table)
+  (setq main-line-dictionary (vlr-data reactor-object))
+  (am:clear-trench (am:get-object main-line-dictionary "block")
+		   (am:get-object main-line-dictionary "block-ref"))
+  (setq table (am:get-object main-line-dictionary "table"))
+  (if table (vla-Delete table)))
+
 (defun am:main-line-modified (owner reactor-object extra
 			      / main-line main-line-dictionary)
-  (setq main-line-dictionary (vlr-data reactor-object))
-  (am:redraw-trench main-line-dictionary)
-  (if (am:get-object main-line-dictionary "legend-block-ref")
-      (am:redraw-legend main-line-dictionary)))
+  (if (vlax-erased-p owner)
+      (am:main-line-deleted owner reactor-object extra)
+      (am:main-line-changed owner reactor-object extra)))
 
 (defun c:edit-trench (/ acad-object doc model-space selected-trench
 			model block-ref dictionary)
