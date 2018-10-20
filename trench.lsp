@@ -1,7 +1,7 @@
-(vl-load-com)
 ;;;; constants and utils
 
 (setq am:boolean 290)
+(setq am:string 300)
 (setq am:pointer 320)
 (setq am:float 1040)
 (setq am:distance 1041)
@@ -62,10 +62,12 @@
     (vlax-variant-value (vlax-safearray-get-element out-value 0))))
 
 (defun am:get-object (dictionary name
-		      / document value)
+		      / document value result)
   (setq document (vla-get-Document dictionary)
-	value (am:get-variable dictionary name))
-  (if value (vla-HandleToObject document value)))
+	value (am:get-variable dictionary name)
+	result (vl-catch-all-apply 'vla-HandleToObject
+				   (list document value)))
+  (if (not (vl-catch-all-error-p result)) result))
 
 
 (defun am:set-variable (dictionary name var-type var-value
@@ -377,8 +379,8 @@
 	(setq new-model (am:make-model (am:object-get model ':name)
 				       (cdr new-properties)
 				       (am:object-get model ':fields)))
-	(callout new-model)
-	(save-callout new-model dictionary))))
+	(save-callout new-model dictionary)
+	(callout new-model))))
 
 (defun am:table-erased (reactor-object
 			/ reactor-data delete-legend-callout dictionary)
@@ -474,6 +476,16 @@
 			     (am:object-get property ':column-count)))
 		      properties))))
 
+(defun am:bind-table-events (table dictionary load-callout modified-callout
+			     save-callout delete-legend-block)
+  (vlr-object-reactor (list table)
+		      (list (cons ':dictionary dictionary)
+			    (cons ':load load-callout)
+			    (cons ':modified modified-callout)
+			    (cons ':save save-callout)
+			    (cons ':delete-legend delete-legend-block))
+		      (list (cons :vlr-modified 'am:table-modified))))
+
 (defun am:create-table (title model dictionary
 			load-callout modified-callout save-callout
 			draw-legend-block delete-legend-block
@@ -498,13 +510,12 @@
   (save-callout model dictionary)
   (modified-callout model)
   (draw-legend-block model)
-  (setq reactor (vlr-object-reactor (list table)
-				    (list (cons ':dictionary dictionary)
-					  (cons ':load load-callout)
-					  (cons ':modified modified-callout)
-					  (cons ':save save-callout)
-					  (cons ':delete-legend delete-legend-block))
-				    (list (cons :vlr-modified 'am:table-modified)))))
+  (am:bind-table-events table
+			dictionary
+			load-callout
+			modified-callout
+			save-collout
+			delete-legend-block))
 
 ;;;; Drawing
 
@@ -876,13 +887,90 @@
   (am:clear-trench (am:get-object main-line-dictionary "block")
 		   (am:get-object main-line-dictionary "block-ref"))
   (setq table (am:get-object main-line-dictionary "table"))
-  (if table (vla-Delete table)))
+  (if table (vla-Delete table))
+  (am:remove-trench main-line-dictionary (vla-get-Document main-line-dictionary)))
 
 (defun am:main-line-modified (owner reactor-object extra
 			      / main-line main-line-dictionary)
   (if (vlax-erased-p owner)
       (am:main-line-deleted owner reactor-object extra)
       (am:main-line-changed owner reactor-object extra)))
+
+(defun am:add-trench (main-line document
+		      / dictionary total-trenches trench-name)
+  (setq dictionary (am:get-dictionary document)
+	total-trenches (am:default (am:get-variable dictionary "total-trenches") 0)
+	trench-name (strcat "trench-" (itoa total-trenches)))
+  (am:set-object dictionary trench-name main-line)
+  (am:set-variable (vla-GetExtensionDictionary main-line)
+		   "trench-name"
+		   am:string
+		   trench-name)
+  (am:set-variable dictionary
+		   "total-trenches"
+		   am:int16
+		   (1+ total-trenches)))
+
+(defun am:bind-trench-events (main-line)
+  (vlr-object-reactor (list main-line)
+		      (vla-GetExtensionDictionary main-line)
+		      (list (cons :vlr-modified 'am:main-line-modified))))
+
+(defun am:remove-trench (main-line-dictionary document
+			 / trench-name dictionary total-trenches
+			 new-total last-trench-name last-trench)
+  (setq trench-name (am:get-variable main-line-dictionary "trench-name")
+	dictionary (am:get-dictionary document)
+	total-trenches (am:get-variable dictionary "total-trenches"))
+  (if (and total-trenches
+	   (and trench-name
+		(am:get-variable dictionary trench-name)))
+      (progn
+	(setq new-total (1- total-trenches)
+	      last-trench-name (strcat "trench-" (itoa new-total)))
+	(if (not (equal last-trench-name trench-name))
+	    (progn
+	      (setq last-trench (am:get-object dictionary
+					       last-trench-name))
+	      (am:set-object dictionary trench-name last-trench)
+	      (am:set-variable (vla-GetExtensionDictionary last-trench)
+			       "trench-name"
+			       am:string
+			       trench-name)))
+	(am:set-object dictionary last-trench-name nil)
+	(am:set-variable dictionary
+			 "total-trenches"
+			 am:int16
+			 new-total))))
+
+(defun am:scan-trenches (/ acad-object doc dictionary trench-index total-trenches
+			 trench-name trench trench-dictionary existing-trenches
+			 table)
+  (setq acad-object (vlax-get-acad-object)
+	doc (vla-get-ActiveDocument acad-object)
+	dictionary (am:get-dictionary doc)
+	total-trenches (am:default
+			(am:get-variable dictionary "total-trenches")
+			0)
+	existing-trenches ())
+  (foreach trench-index (am:seq 0 (1- total-trenches))
+	   (setq trench-name (strcat "trench-" (itoa trench-index))
+		 trench (am:get-object dictionary trench-name))
+	   (if trench
+	       (setq existing-trenches (cons trench existing-trenches)))
+	   (am:set-object dictionary trench-name nil))
+  (am:set-object dictionary "total-trenches" nil)
+  (foreach trench existing-trenches
+	   (am:bind-trench-events trench)
+	   (am:add-trench trench doc)
+	   (setq trench-dictionary (vla-GetExtensionDictionary trench)
+		 table (am:get-object trench-dictionary "table"))
+	   (if table (am:bind-table-events table
+					   trench-dictionary
+					   am:load-trench
+					   am:trench-updated
+					   am:save-trench
+					   am:delete-legend))))
 
 (defun c:edit-trench (/ acad-object doc model-space selected-trench
 			model block-ref dictionary)
@@ -898,26 +986,32 @@
 (defun c:trench (/ acad-object doc start end model-space
 		   start main-line trench-model	
 		   bottom-edges right-slope-bottom left-slope-bottom
-		   right-slope-top left-slope-top)
+		   right-slope-top left-slope-top dictionary)
   (setq acad-object (vlax-get-acad-object)
 	doc (vla-get-ActiveDocument acad-object)
 	model-space (vla-get-ModelSpace doc)
 	main-line (am:construct-main-line doc)
+	dictionary (vla-GetExtensionDictionary main-line)
 	trench-model (am:make-trench-model main-line))
 
+  (am:add-trench main-line doc)
+  
   (am:create-table "Trench parameters"
 		   trench-model
-		   (vla-GetExtensionDictionary main-line)
+		   dictionary
 		   am:load-trench
 		   am:trench-updated
 		   am:save-trench
 		   am:numerate-joints
 		   am:delete-legend
 		   model-space)
+  (am:bind-trench-events main-line))
 
-  (vlr-object-reactor (list main-line)
-		      (vla-GetExtensionDictionary main-line)
-		      (list (cons :vlr-modified 'am:main-line-modified))))
+(defun am:init ()
+  (vl-load-com)
+  (am:scan-trenches))
+
+(am:init)
 
 ;;;;
 ;;allow save-loading
