@@ -514,7 +514,7 @@
 			dictionary
 			load-callout
 			modified-callout
-			save-collout
+			save-callout
 			delete-legend-block))
 
 ;;;; Drawing
